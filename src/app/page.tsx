@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { LatestPost } from "@/app/_components/post";
+import { AnimationGenerator } from "@/app/_components/animation-generator";
 import { api, HydrateClient } from "@/trpc/server";
 
 export default async function Home() {
@@ -43,6 +44,14 @@ export default async function Home() {
             <p className="text-2xl text-white">
               {hello ? hello.greeting : "Loading tRPC query..."}
             </p>
+          </div>
+
+          {/* Animation Generator Section */}
+          <div className="w-full max-w-2xl">
+            <h2 className="text-3xl font-bold text-center mb-6">
+              Triangle Animation Generator
+            </h2>
+            <AnimationGenerator />
           </div>
 
           {/* <LatestPost /> */}
