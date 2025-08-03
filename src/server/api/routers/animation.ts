@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { createTRPCRouter, publicProcedure } from "@/server/api/trpc";
-import { latexToSvg, parseSVGContent } from "@/lib/latex-parser";
-import { generateTriangleAnimation, DEFAULT_CONFIG, type AnimationConfig } from "@/lib/triangle-generator";
+import { latexToSvg, parseSVGContent } from "@/animation/anim-utils/latex-parser";
+import { generateTriangleAnimation, DEFAULT_CONFIG, type AnimationConfig } from "@/animation/triangle-generator";
 
 const animationConfigSchema = z.object({
   width: z.number().optional(),

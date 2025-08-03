@@ -3,7 +3,7 @@ import type { CanvasRenderingContext2D as NodeCanvasCtx } from 'canvas';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { type ParsedLatex, renderLatex } from './latex-parser';
+import { type ParsedLatex, renderLatex } from "@/animation/anim-utils/latex-parser";
 
 export interface AnimationConfig {
   width: number;
