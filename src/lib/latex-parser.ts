@@ -295,6 +295,8 @@ export function renderSVGPath(ctx: CanvasRenderingContext2D, pathData: string): 
   }
 }
 
+// In src/lib/latex-parser.ts, replace the renderLatex function:
+
 export function renderLatex(
   ctx: CanvasRenderingContext2D, 
   latexData: ParsedLatex, 
@@ -372,9 +374,26 @@ export function renderLatex(
     ctx.restore();
   }
   
-  // Render text elements
+  // Calculate bounding box to center text elements
+  let minX = Infinity, maxX = -Infinity;
   for (const textElement of textElements) {
     let charX = textElement.x;
+    for (const char of textElement.content) {
+      const glyph = glyphs.get(char);
+      if (glyph) {
+        minX = Math.min(minX, charX);
+        maxX = Math.max(maxX, charX + glyph.width * 0.01);
+        charX += glyph.width * 0.01;
+      }
+    }
+  }
+  
+  // Center offset
+  const centerOffset = minX !== Infinity ? -(minX + maxX) / 2 : 0;
+  
+  // Render text elements with center offset
+  for (const textElement of textElements) {
+    let charX = textElement.x + centerOffset;
     for (const char of textElement.content) {
       const glyph = glyphs.get(char);
       if (glyph) {

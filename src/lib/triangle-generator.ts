@@ -147,7 +147,7 @@ export async function generateTriangleAnimation(
           drawTriangle(ctx, x, y, config.triangleSize, rotation, config);
           
           // Render LaTeX equation
-          renderLatex(ctx, latexData, config.width / 2, 150, 8);
+          renderLatex(ctx, latexData, config.width / 2 + 500, config.height / 2 - 200, 8);
           
           // Convert to RGB buffer
           const imageData = ctx.getImageData(0, 0, config.width, config.height);
