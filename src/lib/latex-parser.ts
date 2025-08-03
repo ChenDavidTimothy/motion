@@ -16,9 +16,41 @@ export interface ParsedTextElement {
   content: string;
 }
 
+export interface ParsedPathElement {
+  d: string;
+  stroke?: string;
+  strokeWidth?: number;
+  fill?: string;
+  transform?: string;
+}
+
+export interface ParsedLineElement {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  stroke?: string;
+  strokeWidth?: number;
+  transform?: string;
+}
+
+export interface ParsedRectElement {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  fill?: string;
+  stroke?: string;
+  strokeWidth?: number;
+  transform?: string;
+}
+
 export interface ParsedLatex {
   glyphs: Map<string, ParsedGlyph>;
   textElements: ParsedTextElement[];
+  pathElements: ParsedPathElement[];
+  lineElements: ParsedLineElement[];
+  rectElements: ParsedRectElement[];
 }
 
 export async function latexToSvg(equation: string): Promise<string> {
@@ -31,12 +63,14 @@ export async function latexToSvg(equation: string): Promise<string> {
   try {
     // Strip existing math delimiters
     const cleanEquation = equation
+      .replace(/^\\\[/, '')     // ADD: Remove \[ at start
+      .replace(/\\\]$/, '')     // ADD: Remove \] at end
       .replace(/^\\\(/, '')     // Remove \( at start
       .replace(/\\\)$/, '')     // Remove \) at end
-      .replace(/^\$\$/, '')     // Remove $ at start
-      .replace(/\$\$/, '')     // Remove $ at end
+      .replace(/^\$\$/, '')     // Remove $$ at start
+      .replace(/\$\$$/, '')     // Remove $$ at end
       .replace(/^\$/, '')       // Remove $ at start
-      .replace(/\$/, '')       // Remove $ at end
+      .replace(/\$$/, '')       // Remove $ at end
       .trim();
     
     const latexContent = `\\documentclass[preview,border=2pt]{standalone}
@@ -62,15 +96,29 @@ $\\displaystyle ${cleanEquation}$
   }
 }
 
+function parseAttributeValue(tag: string, attribute: string): string | undefined {
+  const match = tag.match(new RegExp(`${attribute}=['"]([^'"]*)['"]\|${attribute}=([^\\s>]*)`));
+  return match?.[1] || match?.[2];
+}
+
+function parseNumericAttribute(tag: string, attribute: string): number {
+  const value = parseAttributeValue(tag, attribute);
+  return value ? parseFloat(value) : 0;
+}
+
 export function parseSVGContent(svgContent: string): ParsedLatex {
   const glyphs = new Map<string, ParsedGlyph>();
+  const textElements: ParsedTextElement[] = [];
+  const pathElements: ParsedPathElement[] = [];
+  const lineElements: ParsedLineElement[] = [];
+  const rectElements: ParsedRectElement[] = [];
   
   // Parse glyphs from SVG font definitions
   for (const match of svgContent.matchAll(/<glyph[^>]*>/gs)) {
     const tag = match[0];
-    const unicode = tag.match(/unicode=['"]([^'"]*)['"]/)?.[1];
-    const width = parseFloat(tag.match(/horiz-adv-x=['"]([^'"]*)['"]/)?.[1] || '500');
-    const pathData = tag.match(/d=['"]([^'"]*)['"]/s)?.[1];
+    const unicode = parseAttributeValue(tag, 'unicode');
+    const width = parseNumericAttribute(tag, 'horiz-adv-x') || 500;
+    const pathData = parseAttributeValue(tag, 'd');
     
     if (unicode && pathData) {
       glyphs.set(unicode, { width, path: pathData });
@@ -78,10 +126,9 @@ export function parseSVGContent(svgContent: string): ParsedLatex {
   }
   
   // Parse text elements
-  const textElements: ParsedTextElement[] = [];
   for (const match of svgContent.matchAll(/<text[^>]*>.*?<\/text>/gs)) {
-    const x = parseFloat(match[0].match(/x=['"]([^'"]*)['"]/)?.[1] || '0');
-    const y = parseFloat(match[0].match(/y=['"]([^'"]*)['"]/)?.[1] || '0');
+    const x = parseNumericAttribute(match[0], 'x');
+    const y = parseNumericAttribute(match[0], 'y');
     const content = match[0].match(/>([^<]+)</)?.[1];
     
     if (content) {
@@ -89,7 +136,76 @@ export function parseSVGContent(svgContent: string): ParsedLatex {
     }
   }
   
-  return { glyphs, textElements };
+  // Parse path elements (fraction lines, radicals, etc.)
+  for (const match of svgContent.matchAll(/<path[^>]*\/?>|<path[^>]*>.*?<\/path>/gs)) {
+    const tag = match[0];
+    const d = parseAttributeValue(tag, 'd');
+    
+    if (d) {
+      pathElements.push({
+        d,
+        stroke: parseAttributeValue(tag, 'stroke'),
+        strokeWidth: parseNumericAttribute(tag, 'stroke-width'),
+        fill: parseAttributeValue(tag, 'fill'),
+        transform: parseAttributeValue(tag, 'transform')
+      });
+    }
+  }
+  
+  // Parse line elements
+  for (const match of svgContent.matchAll(/<line[^>]*\/?>|<line[^>]*>.*?<\/line>/gs)) {
+    const tag = match[0];
+    
+    lineElements.push({
+      x1: parseNumericAttribute(tag, 'x1'),
+      y1: parseNumericAttribute(tag, 'y1'),
+      x2: parseNumericAttribute(tag, 'x2'),
+      y2: parseNumericAttribute(tag, 'y2'),
+      stroke: parseAttributeValue(tag, 'stroke'),
+      strokeWidth: parseNumericAttribute(tag, 'stroke-width'),
+      transform: parseAttributeValue(tag, 'transform')
+    });
+  }
+  
+  // Parse rect elements
+  for (const match of svgContent.matchAll(/<rect[^>]*\/?>|<rect[^>]*>.*?<\/rect>/gs)) {
+    const tag = match[0];
+    
+    rectElements.push({
+      x: parseNumericAttribute(tag, 'x'),
+      y: parseNumericAttribute(tag, 'y'),
+      width: parseNumericAttribute(tag, 'width'),
+      height: parseNumericAttribute(tag, 'height'),
+      fill: parseAttributeValue(tag, 'fill'),
+      stroke: parseAttributeValue(tag, 'stroke'),
+      strokeWidth: parseNumericAttribute(tag, 'stroke-width'),
+      transform: parseAttributeValue(tag, 'transform')
+    });
+  }
+  
+  return { glyphs, textElements, pathElements, lineElements, rectElements };
+}
+
+function applyTransform(ctx: CanvasRenderingContext2D, transform?: string): void {
+  if (!transform) return;
+  
+  // Parse basic transforms: translate(x,y), scale(x,y), rotate(angle)
+  const translateMatch = transform.match(/translate\(([^,]+),([^)]+)\)/);
+  if (translateMatch) {
+    ctx.translate(parseFloat(translateMatch[1]), parseFloat(translateMatch[2]));
+  }
+  
+  const scaleMatch = transform.match(/scale\(([^,]+)(?:,([^)]+))?\)/);
+  if (scaleMatch) {
+    const sx = parseFloat(scaleMatch[1]);
+    const sy = scaleMatch[2] ? parseFloat(scaleMatch[2]) : sx;
+    ctx.scale(sx, sy);
+  }
+  
+  const rotateMatch = transform.match(/rotate\(([^)]+)\)/);
+  if (rotateMatch) {
+    ctx.rotate(parseFloat(rotateMatch[1]) * Math.PI / 180);
+  }
 }
 
 export function renderSVGPath(ctx: CanvasRenderingContext2D, pathData: string): void {
@@ -177,9 +293,6 @@ export function renderSVGPath(ctx: CanvasRenderingContext2D, pathData: string): 
         break;
     }
   }
-  
-  ctx.fillStyle = '#ffffff';
-  ctx.fill();
 }
 
 export function renderLatex(
@@ -189,12 +302,77 @@ export function renderLatex(
   y: number, 
   scale: number = 1
 ): void {
-  const { glyphs, textElements } = latexData;
+  const { glyphs, textElements, pathElements, lineElements, rectElements } = latexData;
   
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(scale, scale);
   
+  // Render paths (fraction lines, radicals, etc.)
+  for (const pathElement of pathElements) {
+    ctx.save();
+    applyTransform(ctx, pathElement.transform);
+    
+    renderSVGPath(ctx, pathElement.d);
+    
+    if (pathElement.fill && pathElement.fill !== 'none') {
+      ctx.fillStyle = pathElement.fill;
+      ctx.fill();
+    }
+    
+    if (pathElement.stroke && pathElement.stroke !== 'none') {
+      ctx.strokeStyle = pathElement.stroke;
+      ctx.lineWidth = pathElement.strokeWidth || 1;
+      ctx.stroke();
+    } else {
+      // Default to white fill for visibility
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+    }
+    
+    ctx.restore();
+  }
+  
+  // Render lines
+  for (const lineElement of lineElements) {
+    ctx.save();
+    applyTransform(ctx, lineElement.transform);
+    
+    ctx.beginPath();
+    ctx.moveTo(lineElement.x1, lineElement.y1);
+    ctx.lineTo(lineElement.x2, lineElement.y2);
+    
+    ctx.strokeStyle = lineElement.stroke || '#ffffff';
+    ctx.lineWidth = lineElement.strokeWidth || 1;
+    ctx.stroke();
+    
+    ctx.restore();
+  }
+  
+  // Render rectangles
+  for (const rectElement of rectElements) {
+    ctx.save();
+    applyTransform(ctx, rectElement.transform);
+    
+    if (rectElement.fill && rectElement.fill !== 'none') {
+      ctx.fillStyle = rectElement.fill;
+      ctx.fillRect(rectElement.x, rectElement.y, rectElement.width, rectElement.height);
+    }
+    
+    if (rectElement.stroke && rectElement.stroke !== 'none') {
+      ctx.strokeStyle = rectElement.stroke;
+      ctx.lineWidth = rectElement.strokeWidth || 1;
+      ctx.strokeRect(rectElement.x, rectElement.y, rectElement.width, rectElement.height);
+    } else if (!rectElement.fill || rectElement.fill === 'none') {
+      // Default to white fill for visibility
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(rectElement.x, rectElement.y, rectElement.width, rectElement.height);
+    }
+    
+    ctx.restore();
+  }
+  
+  // Render text elements
   for (const textElement of textElements) {
     let charX = textElement.x;
     for (const char of textElement.content) {
@@ -204,6 +382,8 @@ export function renderLatex(
         ctx.translate(charX, textElement.y);
         ctx.scale(0.01, -0.01);
         renderSVGPath(ctx, glyph.path);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
         ctx.restore();
         charX += glyph.width * 0.01;
       }
