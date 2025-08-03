@@ -1,4 +1,5 @@
 import { createCanvas } from 'canvas';
+import type { CanvasRenderingContext2D as NodeCanvasCtx } from 'canvas';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -41,7 +42,7 @@ export function easeInOutCubic(t: number): number {
 }
 
 function drawTriangle(
-  ctx: CanvasRenderingContext2D,
+  ctx: NodeCanvasCtx,
   x: number,
   y: number,
   size: number,
@@ -76,11 +77,11 @@ function writeFrame(
         ffmpegProcess.stdin?.removeListener('error', onError);
         resolve();
       };
-      const onError = (error: Error) => {
+      const onError = (error: unknown) => {
         ffmpegProcess.stdin?.removeListener('drain', onDrain);
-        reject(error);
+        reject(error instanceof Error ? error : new Error(String(error)));
       };
-      
+
       ffmpegProcess.stdin?.once('drain', onDrain);
       ffmpegProcess.stdin?.once('error', onError);
     }
@@ -93,31 +94,54 @@ export async function generateTriangleAnimation(
   config: AnimationConfig = DEFAULT_CONFIG
 ): Promise<string> {
   const outputDir = path.join(process.cwd(), 'public', 'animations');
-  const filename = `triangle_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.mp4`;
+  const filename = `triangle_${Date.now()}_${Math.random()
+    .toString(36)
+    .substr(2, 9)}.mp4`;
   const outputPath = path.join(outputDir, filename);
-  
+
   // Ensure output directory exists
   if (!fs.existsSync(outputDir)) {
     fs.mkdirSync(outputDir, { recursive: true });
   }
 
-  const TOTAL_FRAMES = config.fps * config.duration;
-  const MOVE_DISTANCE = config.width - (config.margin * 2);
-  const canvas = createCanvas(config.width, config.height);
-  const ctx = canvas.getContext('2d');
+  const { width, height, fps, duration } = config;
+  const TOTAL_FRAMES = fps * duration;
+  const MOVE_DISTANCE = width - config.margin * 2;
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d') as unknown as NodeCanvasCtx;
 
   return new Promise((resolve, reject) => {
     const ffmpegProcess = spawn('ffmpeg', [
-      '-f', 'rawvideo', '-pix_fmt', 'rgb24',
-      '-s', `${config.width}x${config.height}`,
-      '-r', config.fps.toString(), '-i', 'pipe:0',
-      '-pix_fmt', 'yuv420p', '-c:v', 'libx264',
-      '-preset', config.videoPreset, '-crf', config.videoCrf.toString(),
-      '-y', outputPath
+      '-f',
+      'rawvideo',
+      '-pix_fmt',
+      'rgb24',
+      '-s',
+      `${width}x${height}`,
+      '-r',
+      fps.toString(),
+      '-i',
+      'pipe:0',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:v',
+      'libx264',
+      '-preset',
+      config.videoPreset,
+      '-crf',
+      config.videoCrf.toString(),
+      '-y',
+      outputPath
     ]);
 
     ffmpegProcess.on('error', (error) => {
-      reject(new Error(`FFmpeg failed: ${error.message}`));
+      reject(
+        new Error(
+          `FFmpeg failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+      );
     });
 
     ffmpegProcess.on('close', (code) => {
@@ -128,47 +152,52 @@ export async function generateTriangleAnimation(
       }
     });
 
-    // Generate and stream frames
-    (async () => {
-      try {
-        for (let frame = 0; frame < TOTAL_FRAMES; frame++) {
-          const progress = frame / (TOTAL_FRAMES - 1);
-          const easedProgress = easeInOutCubic(progress);
-          
-          const x = config.margin + (easedProgress * MOVE_DISTANCE);
-          const y = config.height / 2;
-          const rotation = easedProgress * Math.PI * 2 * config.rotations;
-          
-          // Clear canvas
-          ctx.fillStyle = config.backgroundColor;
-          ctx.fillRect(0, 0, config.width, config.height);
-          
-          // Draw triangle
-          drawTriangle(ctx, x, y, config.triangleSize, rotation, config);
-          
-          // Render LaTeX equation
-          renderLatex(ctx, latexData, config.width / 2 + 500, config.height / 2 - 200, 8);
-          
-          // Convert to RGB buffer
-          const imageData = ctx.getImageData(0, 0, config.width, config.height);
-          const rgbPixels = new Uint8Array(config.width * config.height * 3);
-          
-          for (let i = 0; i < config.width * config.height; i++) {
-            const rgbaIndex = i * 4;
-            const rgbIndex = i * 3;
-            rgbPixels[rgbIndex] = imageData.data[rgbaIndex];
-            rgbPixels[rgbIndex + 1] = imageData.data[rgbaIndex + 1];
-            rgbPixels[rgbIndex + 2] = imageData.data[rgbaIndex + 2];
-          }
-          
-          await writeFrame(ffmpegProcess, Buffer.from(rgbPixels));
+    // Start the async producer and explicitly handle its promise
+    // to satisfy both no-misused-promises and no-floating-promises.
+    const producer = (async () => {
+      for (let frame = 0; frame < TOTAL_FRAMES; frame++) {
+        const progress = frame / (TOTAL_FRAMES - 1);
+        const easedProgress = easeInOutCubic(progress);
+
+        const x = config.margin + easedProgress * MOVE_DISTANCE;
+        const y = height / 2;
+        const rotation = easedProgress * Math.PI * 2 * config.rotations;
+
+        // Clear canvas
+        ctx.fillStyle = config.backgroundColor;
+        ctx.fillRect(0, 0, width, height);
+
+        // Draw triangle
+        drawTriangle(ctx, x, y, config.triangleSize, rotation, config);
+
+        // Render LaTeX equation
+        // If the declared type in latex-parser expects a DOM ctx,
+        // widen it in that module (recommended) or overload there.
+        renderLatex(ctx as unknown as CanvasRenderingContext2D, latexData, width / 2 + 500, height / 2 - 200, 8);
+
+        // Convert to RGB buffer
+        const imageData = ctx.getImageData(0, 0, width, height);
+        const pixelCount = width * height;
+        const rgbPixels = new Uint8Array(pixelCount * 3);
+
+        for (let i = 0; i < pixelCount; i++) {
+          const rgbaIndex = i * 4;
+          const rgbIndex = i * 3;
+          rgbPixels[rgbIndex] = imageData.data[rgbaIndex]!;
+          rgbPixels[rgbIndex + 1] = imageData.data[rgbaIndex + 1]!;
+          rgbPixels[rgbIndex + 2] = imageData.data[rgbaIndex + 2]!;
         }
-        
-        ffmpegProcess.stdin?.end();
-      } catch (error) {
-        ffmpegProcess.kill();
-        reject(error);
+
+        await writeFrame(ffmpegProcess, Buffer.from(rgbPixels));
       }
+
+      ffmpegProcess.stdin?.end();
     })();
+
+    producer.catch((error) => {
+      ffmpegProcess.kill();
+      const err = error instanceof Error ? error : new Error(String(error));
+      reject(err);
+    });
   });
 }

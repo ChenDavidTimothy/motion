@@ -1,10 +1,11 @@
-import { spawn, exec } from 'child_process';
+import { exec } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 
 const execAsync = promisify(exec);
 
+// --- INTERFACES (Original) ---
 export interface ParsedGlyph {
   width: number;
   path: string;
@@ -53,6 +54,7 @@ export interface ParsedLatex {
   rectElements: ParsedRectElement[];
 }
 
+// --- latexToSvg (Original) ---
 export async function latexToSvg(equation: string): Promise<string> {
   const tempDir = path.join(process.cwd(), 'temp', `latex_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
   
@@ -61,16 +63,15 @@ export async function latexToSvg(equation: string): Promise<string> {
   }
   
   try {
-    // Strip existing math delimiters
     const cleanEquation = equation
-      .replace(/^\\\[/, '')     // ADD: Remove \[ at start
-      .replace(/\\\]$/, '')     // ADD: Remove \] at end
-      .replace(/^\\\(/, '')     // Remove \( at start
-      .replace(/\\\)$/, '')     // Remove \) at end
-      .replace(/^\$\$/, '')     // Remove $$ at start
-      .replace(/\$\$$/, '')     // Remove $$ at end
-      .replace(/^\$/, '')       // Remove $ at start
-      .replace(/\$$/, '')       // Remove $ at end
+      .replace(/^\\\[/, '')
+      .replace(/\\\]$/, '')
+      .replace(/^\\\(/, '')
+      .replace(/\\\)$/, '')
+      .replace(/^\$\$/, '')
+      .replace(/\$\$$/, '')
+      .replace(/^\$/, '')
+      .replace(/\$$/, '')
       .trim();
     
     const latexContent = `\\documentclass[preview,border=2pt]{standalone}
@@ -89,23 +90,31 @@ $\\displaystyle ${cleanEquation}$
     
     return svgContent;
   } finally {
-    // Cleanup temp directory
     if (fs.existsSync(tempDir)) {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   }
 }
 
+// --- PARSING HELPERS (Corrected) ---
 function parseAttributeValue(tag: string, attribute: string): string | undefined {
-  const match = tag.match(new RegExp(`${attribute}=['"]([^'"]*)['"]\|${attribute}=([^\\s>]*)`));
-  return match?.[1] || match?.[2];
+  // FIX: Use RegExp#exec() instead of String#match.
+  const match = new RegExp(`${attribute}=['"]([^'"]*)['"]|${attribute}=([^\\s>]*)`).exec(tag);
+  // FIX: Use nullish coalescing '??' for safer access.
+  return match?.[1] ?? match?.[2];
 }
 
-function parseNumericAttribute(tag: string, attribute: string): number {
+// FIX: Changed return type to number | undefined to allow for safer checks at call sites.
+function parseNumericAttribute(tag: string, attribute: string): number | undefined {
   const value = parseAttributeValue(tag, attribute);
-  return value ? parseFloat(value) : 0;
+  if (value === undefined) {
+      return undefined;
+  }
+  const num = parseFloat(value);
+  return isNaN(num) ? undefined : num;
 }
 
+// --- parseSVGContent (Corrected) ---
 export function parseSVGContent(svgContent: string): ParsedLatex {
   const glyphs = new Map<string, ParsedGlyph>();
   const textElements: ParsedTextElement[] = [];
@@ -113,11 +122,11 @@ export function parseSVGContent(svgContent: string): ParsedLatex {
   const lineElements: ParsedLineElement[] = [];
   const rectElements: ParsedRectElement[] = [];
   
-  // Parse glyphs from SVG font definitions
   for (const match of svgContent.matchAll(/<glyph[^>]*>/gs)) {
     const tag = match[0];
     const unicode = parseAttributeValue(tag, 'unicode');
-    const width = parseNumericAttribute(tag, 'horiz-adv-x') || 500;
+    // FIX: Use '??' for safer default value. This now correctly handles a width of 0.
+    const width = parseNumericAttribute(tag, 'horiz-adv-x') ?? 500;
     const pathData = parseAttributeValue(tag, 'd');
     
     if (unicode && pathData) {
@@ -125,18 +134,18 @@ export function parseSVGContent(svgContent: string): ParsedLatex {
     }
   }
   
-  // Parse text elements
   for (const match of svgContent.matchAll(/<text[^>]*>.*?<\/text>/gs)) {
-    const x = parseNumericAttribute(match[0], 'x');
-    const y = parseNumericAttribute(match[0], 'y');
-    const content = match[0].match(/>([^<]+)</)?.[1];
+    // FIX: Add '?? 0' to keep original behavior of defaulting to 0.
+    const x = parseNumericAttribute(match[0], 'x') ?? 0;
+    const y = parseNumericAttribute(match[0], 'y') ?? 0;
+    // FIX: Use RegExp#exec() for consistency.
+    const content = />([^<]+)</.exec(match[0])?.[1];
     
     if (content) {
       textElements.push({ x, y, content });
     }
   }
   
-  // Parse path elements (fraction lines, radicals, etc.)
   for (const match of svgContent.matchAll(/<path[^>]*\/?>|<path[^>]*>.*?<\/path>/gs)) {
     const tag = match[0];
     const d = parseAttributeValue(tag, 'd');
@@ -152,30 +161,26 @@ export function parseSVGContent(svgContent: string): ParsedLatex {
     }
   }
   
-  // Parse line elements
   for (const match of svgContent.matchAll(/<line[^>]*\/?>|<line[^>]*>.*?<\/line>/gs)) {
     const tag = match[0];
-    
     lineElements.push({
-      x1: parseNumericAttribute(tag, 'x1'),
-      y1: parseNumericAttribute(tag, 'y1'),
-      x2: parseNumericAttribute(tag, 'x2'),
-      y2: parseNumericAttribute(tag, 'y2'),
+      x1: parseNumericAttribute(tag, 'x1') ?? 0,
+      y1: parseNumericAttribute(tag, 'y1') ?? 0,
+      x2: parseNumericAttribute(tag, 'x2') ?? 0,
+      y2: parseNumericAttribute(tag, 'y2') ?? 0,
       stroke: parseAttributeValue(tag, 'stroke'),
       strokeWidth: parseNumericAttribute(tag, 'stroke-width'),
       transform: parseAttributeValue(tag, 'transform')
     });
   }
   
-  // Parse rect elements
   for (const match of svgContent.matchAll(/<rect[^>]*\/?>|<rect[^>]*>.*?<\/rect>/gs)) {
     const tag = match[0];
-    
     rectElements.push({
-      x: parseNumericAttribute(tag, 'x'),
-      y: parseNumericAttribute(tag, 'y'),
-      width: parseNumericAttribute(tag, 'width'),
-      height: parseNumericAttribute(tag, 'height'),
+      x: parseNumericAttribute(tag, 'x') ?? 0,
+      y: parseNumericAttribute(tag, 'y') ?? 0,
+      width: parseNumericAttribute(tag, 'width') ?? 0,
+      height: parseNumericAttribute(tag, 'height') ?? 0,
       fill: parseAttributeValue(tag, 'fill'),
       stroke: parseAttributeValue(tag, 'stroke'),
       strokeWidth: parseNumericAttribute(tag, 'stroke-width'),
@@ -186,24 +191,25 @@ export function parseSVGContent(svgContent: string): ParsedLatex {
   return { glyphs, textElements, pathElements, lineElements, rectElements };
 }
 
+// --- RENDER HELPERS (Corrected) ---
 function applyTransform(ctx: CanvasRenderingContext2D, transform?: string): void {
   if (!transform) return;
   
-  // Parse basic transforms: translate(x,y), scale(x,y), rotate(angle)
-  const translateMatch = transform.match(/translate\(([^,]+),([^)]+)\)/);
-  if (translateMatch) {
+  // FIX: Use exec() and add safety checks for captured groups.
+  const translateMatch = /translate\(([^,]+),([^)]+)\)/.exec(transform);
+  if (translateMatch?.[1] && translateMatch?.[2]) {
     ctx.translate(parseFloat(translateMatch[1]), parseFloat(translateMatch[2]));
   }
   
-  const scaleMatch = transform.match(/scale\(([^,]+)(?:,([^)]+))?\)/);
-  if (scaleMatch) {
+  const scaleMatch = /scale\(([^,]+)(?:,([^)]+))?\)/.exec(transform);
+  if (scaleMatch?.[1]) {
     const sx = parseFloat(scaleMatch[1]);
     const sy = scaleMatch[2] ? parseFloat(scaleMatch[2]) : sx;
     ctx.scale(sx, sy);
   }
   
-  const rotateMatch = transform.match(/rotate\(([^)]+)\)/);
-  if (rotateMatch) {
+  const rotateMatch = /rotate\(([^)]+)\)/.exec(transform);
+  if (rotateMatch?.[1]) {
     ctx.rotate(parseFloat(rotateMatch[1]) * Math.PI / 180);
   }
 }
@@ -214,9 +220,9 @@ export function renderSVGPath(ctx: CanvasRenderingContext2D, pathData: string): 
   const commands: string[] = [];
   let i = 0;
   while (i < pathData.length) {
-    if (/[MmLlHhVvCcSsQqTtAaZz]/.test(pathData[i])) {
+    if (/[MmLlHhVvCcSsQqTtAaZz]/.test(pathData[i]!)) {
       let j = i + 1;
-      while (j < pathData.length && !/[MmLlHhVvCcSsQqTtAaZz]/.test(pathData[j])) j++;
+      while (j < pathData.length && !/[MmLlHhVvCcSsQqTtAaZz]/.test(pathData[j]!)) j++;
       commands.push(pathData.slice(i, j));
       i = j;
     } else i++;
@@ -226,65 +232,85 @@ export function renderSVGPath(ctx: CanvasRenderingContext2D, pathData: string): 
   let currentX = 0, currentY = 0, startX = 0, startY = 0, lastControlX = 0, lastControlY = 0;
   
   for (const command of commands) {
-    const type = command[0];
+    // FIX: Add guard against empty strings to prevent 'type' from being undefined.
+    if (!command) continue;
+
+    const type = command[0]!;
     const isRelative = type === type.toLowerCase();
     const coords = [...command.slice(1).trim().matchAll(/-?\d*\.?\d+/g)].map(m => parseFloat(m[0]));
     
+    // FIX: Add length checks and non-null assertions (!) to ensure type safety.
     switch (type.toUpperCase()) {
       case 'M':
-        currentX = isRelative ? currentX + coords[0] : coords[0];
-        currentY = isRelative ? currentY + coords[1] : coords[1];
-        startX = currentX; startY = currentY;
-        ctx.moveTo(currentX, currentY);
+        if (coords.length >= 2) {
+            currentX = isRelative ? currentX + coords[0]! : coords[0]!;
+            currentY = isRelative ? currentY + coords[1]! : coords[1]!;
+            startX = currentX; startY = currentY;
+            ctx.moveTo(currentX, currentY);
+        }
         break;
       case 'L':
-        currentX = isRelative ? currentX + coords[0] : coords[0];
-        currentY = isRelative ? currentY + coords[1] : coords[1];
-        ctx.lineTo(currentX, currentY);
+        if (coords.length >= 2) {
+            currentX = isRelative ? currentX + coords[0]! : coords[0]!;
+            currentY = isRelative ? currentY + coords[1]! : coords[1]!;
+            ctx.lineTo(currentX, currentY);
+        }
         break;
       case 'H':
-        currentX = isRelative ? currentX + coords[0] : coords[0];
-        ctx.lineTo(currentX, currentY);
+        if (coords.length >= 1) {
+            currentX = isRelative ? currentX + coords[0]! : coords[0]!;
+            ctx.lineTo(currentX, currentY);
+        }
         break;
       case 'V':
-        currentY = isRelative ? currentY + coords[0] : coords[0];
-        ctx.lineTo(currentX, currentY);
+        if (coords.length >= 1) {
+            currentY = isRelative ? currentY + coords[0]! : coords[0]!;
+            ctx.lineTo(currentX, currentY);
+        }
         break;
       case 'C':
-        const cp1x = isRelative ? currentX + coords[0] : coords[0];
-        const cp1y = isRelative ? currentY + coords[1] : coords[1];
-        const cp2x = isRelative ? currentX + coords[2] : coords[2];
-        const cp2y = isRelative ? currentY + coords[3] : coords[3];
-        currentX = isRelative ? currentX + coords[4] : coords[4];
-        currentY = isRelative ? currentY + coords[5] : coords[5];
-        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, currentX, currentY);
-        lastControlX = cp2x; lastControlY = cp2y;
+        if (coords.length >= 6) {
+            const cp1x = isRelative ? currentX + coords[0]! : coords[0]!;
+            const cp1y = isRelative ? currentY + coords[1]! : coords[1]!;
+            const cp2x = isRelative ? currentX + coords[2]! : coords[2]!;
+            const cp2y = isRelative ? currentY + coords[3]! : coords[3]!;
+            currentX = isRelative ? currentX + coords[4]! : coords[4]!;
+            currentY = isRelative ? currentY + coords[5]! : coords[5]!;
+            ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, currentX, currentY);
+            lastControlX = cp2x; lastControlY = cp2y;
+        }
         break;
       case 'S':
-        const scp1x = 2 * currentX - lastControlX;
-        const scp1y = 2 * currentY - lastControlY;
-        const scp2x = isRelative ? currentX + coords[0] : coords[0];
-        const scp2y = isRelative ? currentY + coords[1] : coords[1];
-        currentX = isRelative ? currentX + coords[2] : coords[2];
-        currentY = isRelative ? currentY + coords[3] : coords[3];
-        ctx.bezierCurveTo(scp1x, scp1y, scp2x, scp2y, currentX, currentY);
-        lastControlX = scp2x; lastControlY = scp2y;
+        if (coords.length >= 4) {
+            const scp1x = 2 * currentX - lastControlX;
+            const scp1y = 2 * currentY - lastControlY;
+            const scp2x = isRelative ? currentX + coords[0]! : coords[0]!;
+            const scp2y = isRelative ? currentY + coords[1]! : coords[1]!;
+            currentX = isRelative ? currentX + coords[2]! : coords[2]!;
+            currentY = isRelative ? currentY + coords[3]! : coords[3]!;
+            ctx.bezierCurveTo(scp1x, scp1y, scp2x, scp2y, currentX, currentY);
+            lastControlX = scp2x; lastControlY = scp2y;
+        }
         break;
       case 'Q':
-        const qcp1x = isRelative ? currentX + coords[0] : coords[0];
-        const qcp1y = isRelative ? currentY + coords[1] : coords[1];
-        currentX = isRelative ? currentX + coords[2] : coords[2];
-        currentY = isRelative ? currentY + coords[3] : coords[3];
-        ctx.quadraticCurveTo(qcp1x, qcp1y, currentX, currentY);
-        lastControlX = qcp1x; lastControlY = qcp1y;
+        if (coords.length >= 4) {
+            const qcp1x = isRelative ? currentX + coords[0]! : coords[0]!;
+            const qcp1y = isRelative ? currentY + coords[1]! : coords[1]!;
+            currentX = isRelative ? currentX + coords[2]! : coords[2]!;
+            currentY = isRelative ? currentY + coords[3]! : coords[3]!;
+            ctx.quadraticCurveTo(qcp1x, qcp1y, currentX, currentY);
+            lastControlX = qcp1x; lastControlY = qcp1y;
+        }
         break;
       case 'T':
-        const tcp1x = 2 * currentX - lastControlX;
-        const tcp1y = 2 * currentY - lastControlY;
-        currentX = isRelative ? currentX + coords[0] : coords[0];
-        currentY = isRelative ? currentY + coords[1] : coords[1];
-        ctx.quadraticCurveTo(tcp1x, tcp1y, currentX, currentY);
-        lastControlX = tcp1x; lastControlY = tcp1y;
+        if (coords.length >= 2) {
+            const tcp1x = 2 * currentX - lastControlX;
+            const tcp1y = 2 * currentY - lastControlY;
+            currentX = isRelative ? currentX + coords[0]! : coords[0]!;
+            currentY = isRelative ? currentY + coords[1]! : coords[1]!;
+            ctx.quadraticCurveTo(tcp1x, tcp1y, currentX, currentY);
+            lastControlX = tcp1x; lastControlY = tcp1y;
+        }
         break;
       case 'Z':
         ctx.lineTo(startX, startY);
@@ -295,14 +321,13 @@ export function renderSVGPath(ctx: CanvasRenderingContext2D, pathData: string): 
   }
 }
 
-// In src/lib/latex-parser.ts, replace the renderLatex function:
-
+// --- renderLatex (Corrected) ---
 export function renderLatex(
   ctx: CanvasRenderingContext2D, 
   latexData: ParsedLatex, 
   x: number, 
   y: number, 
-  scale: number = 1
+  scale = 1
 ): void {
   const { glyphs, textElements, pathElements, lineElements, rectElements } = latexData;
   
@@ -310,11 +335,9 @@ export function renderLatex(
   ctx.translate(x, y);
   ctx.scale(scale, scale);
   
-  // Render paths (fraction lines, radicals, etc.)
   for (const pathElement of pathElements) {
     ctx.save();
     applyTransform(ctx, pathElement.transform);
-    
     renderSVGPath(ctx, pathElement.d);
     
     if (pathElement.fill && pathElement.fill !== 'none') {
@@ -324,10 +347,10 @@ export function renderLatex(
     
     if (pathElement.stroke && pathElement.stroke !== 'none') {
       ctx.strokeStyle = pathElement.stroke;
-      ctx.lineWidth = pathElement.strokeWidth || 1;
+      // FIX: Use nullish coalescing for safer defaults.
+      ctx.lineWidth = pathElement.strokeWidth ?? 1;
       ctx.stroke();
-    } else {
-      // Default to white fill for visibility
+    } else if (!pathElement.fill || pathElement.fill === 'none') {
       ctx.fillStyle = '#ffffff';
       ctx.fill();
     }
@@ -335,23 +358,21 @@ export function renderLatex(
     ctx.restore();
   }
   
-  // Render lines
   for (const lineElement of lineElements) {
     ctx.save();
     applyTransform(ctx, lineElement.transform);
-    
     ctx.beginPath();
     ctx.moveTo(lineElement.x1, lineElement.y1);
     ctx.lineTo(lineElement.x2, lineElement.y2);
     
-    ctx.strokeStyle = lineElement.stroke || '#ffffff';
-    ctx.lineWidth = lineElement.strokeWidth || 1;
+    // FIX: Use '??' for safer defaults.
+    ctx.strokeStyle = lineElement.stroke ?? '#ffffff';
+    ctx.lineWidth = lineElement.strokeWidth ?? 1;
     ctx.stroke();
     
     ctx.restore();
   }
   
-  // Render rectangles
   for (const rectElement of rectElements) {
     ctx.save();
     applyTransform(ctx, rectElement.transform);
@@ -363,10 +384,9 @@ export function renderLatex(
     
     if (rectElement.stroke && rectElement.stroke !== 'none') {
       ctx.strokeStyle = rectElement.stroke;
-      ctx.lineWidth = rectElement.strokeWidth || 1;
+      ctx.lineWidth = rectElement.strokeWidth ?? 1;
       ctx.strokeRect(rectElement.x, rectElement.y, rectElement.width, rectElement.height);
     } else if (!rectElement.fill || rectElement.fill === 'none') {
-      // Default to white fill for visibility
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(rectElement.x, rectElement.y, rectElement.width, rectElement.height);
     }
@@ -374,7 +394,7 @@ export function renderLatex(
     ctx.restore();
   }
   
-  // Calculate bounding box to center text elements
+  // FIX: Removed inferrable types.
   let minX = Infinity, maxX = -Infinity;
   for (const textElement of textElements) {
     let charX = textElement.x;
@@ -388,10 +408,8 @@ export function renderLatex(
     }
   }
   
-  // Center offset
   const centerOffset = minX !== Infinity ? -(minX + maxX) / 2 : 0;
   
-  // Render text elements with center offset
   for (const textElement of textElements) {
     let charX = textElement.x + centerOffset;
     for (const char of textElement.content) {
