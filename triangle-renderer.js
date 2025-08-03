@@ -1,91 +1,115 @@
 import { createCanvas } from 'canvas';
 import { spawn } from 'child_process';
 
-// Video settings
-const WIDTH = 1920;
-const HEIGHT = 1080;
-const FPS = 60;
-const DURATION = 3; // seconds
-const TOTAL_FRAMES = FPS * DURATION;
+const CONFIG = {
+  WIDTH: 1920,
+  HEIGHT: 1080,
+  FPS: 60,
+  DURATION: 3,
+  TRIANGLE_SIZE: 80,
+  MARGIN: 100,
+  ROTATIONS: 2,
+  BACKGROUND_COLOR: '#000000',
+  TRIANGLE_COLOR: '#ff4444',
+  STROKE_COLOR: '#ffffff',
+  STROKE_WIDTH: 3,
+  VIDEO_PRESET: 'medium',
+  VIDEO_CRF: 18
+};
 
-// Create canvas
-const canvas = createCanvas(WIDTH, HEIGHT);
+const TOTAL_FRAMES = CONFIG.FPS * CONFIG.DURATION;
+const MOVE_DISTANCE = CONFIG.WIDTH - (CONFIG.MARGIN * 2);
+
+const canvas = createCanvas(CONFIG.WIDTH, CONFIG.HEIGHT);
 const ctx = canvas.getContext('2d');
 
-// Setup FFmpeg process
-const ffmpegArgs = [
-  '-f', 'rawvideo',
-  '-pix_fmt', 'rgb24',
-  '-s', `${WIDTH}x${HEIGHT}`,
-  '-r', FPS.toString(),
-  '-i', 'pipe:0',
-  '-pix_fmt', 'yuv420p',
-  '-c:v', 'libx264',
-  '-y', // overwrite output file
-  'triangle_animation.mp4'
-];
+function easeInOutCubic(t) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
 
-const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
+function drawTriangle(x, y, size, rotation) {
+  ctx.save();
+  ctx.translate(Math.round(x), Math.round(y));
+  ctx.rotate(rotation);
+  ctx.fillStyle = CONFIG.TRIANGLE_COLOR;
+  ctx.strokeStyle = CONFIG.STROKE_COLOR;
+  ctx.lineWidth = CONFIG.STROKE_WIDTH;
+  ctx.beginPath();
+  ctx.moveTo(0, -size);
+  ctx.lineTo(-size * 0.866, size * 0.5);
+  ctx.lineTo(size * 0.866, size * 0.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
 
-ffmpegProcess.stdout.on('data', (data) => {
-  console.log(`FFmpeg: ${data}`);
-});
+const ffmpegProcess = spawn('ffmpeg', [
+  '-f', 'rawvideo', '-pix_fmt', 'rgb24',
+  '-s', `${CONFIG.WIDTH}x${CONFIG.HEIGHT}`,
+  '-r', CONFIG.FPS.toString(), '-i', 'pipe:0',
+  '-pix_fmt', 'yuv420p', '-c:v', 'libx264',
+  '-preset', CONFIG.VIDEO_PRESET, '-crf', CONFIG.VIDEO_CRF.toString(),
+  '-y', 'triangle_animation.mp4'
+]);
 
-ffmpegProcess.stderr.on('data', (data) => {
-  // FFmpeg outputs to stderr by default
-  console.log(`FFmpeg: ${data}`);
+ffmpegProcess.on('error', (error) => {
+  throw new Error(`FFmpeg failed: ${error.message}`);
 });
 
 ffmpegProcess.on('close', (code) => {
-  if (code === 0) {
-    console.log('Video generated: triangle_animation.mp4');
-  } else {
-    console.error(`FFmpeg exited with code ${code}`);
-  }
+  if (code !== 0) throw new Error(`FFmpeg exited with code ${code}`);
 });
 
-// Triangle drawing function
-function drawTriangle(x, y, size, color) {
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.moveTo(x, y - size);           // top
-  ctx.lineTo(x - size, y + size);    // bottom left  
-  ctx.lineTo(x + size, y + size);    // bottom right
-  ctx.closePath();
-  ctx.fill();
+async function writeFrame(frameData) {
+  return new Promise((resolve, reject) => {
+    if (ffmpegProcess.stdin.write(frameData)) {
+      resolve();
+    } else {
+      const onDrain = () => {
+        ffmpegProcess.stdin.removeListener('error', onError);
+        resolve();
+      };
+      const onError = (error) => {
+        ffmpegProcess.stdin.removeListener('drain', onDrain);
+        reject(error);
+      };
+      
+      ffmpegProcess.stdin.once('drain', onDrain);
+      ffmpegProcess.stdin.once('error', onError);
+    }
+  });
 }
 
-// Render frames
-for (let frame = 0; frame < TOTAL_FRAMES; frame++) {
-  // Clear canvas (black background)
-  ctx.fillStyle = 'black';
-  ctx.fillRect(0, 0, WIDTH, HEIGHT);
-  
-  // Calculate triangle position (left to right)
-  const progress = frame / (TOTAL_FRAMES - 1);
-  const triangleX = 100 + (progress * (WIDTH - 200)); // Move from 100 to WIDTH-100
-  const triangleY = HEIGHT / 2;
-  
-  // Draw triangle
-  drawTriangle(triangleX, triangleY, 50, 'red');
-  
-  // Get pixel data
-  const imageData = ctx.getImageData(0, 0, WIDTH, HEIGHT);
-  const pixels = imageData.data; // RGBA format
-  
-  // Convert RGBA to RGB for FFmpeg
-  const rgbPixels = new Uint8Array(WIDTH * HEIGHT * 3);
-  for (let i = 0; i < WIDTH * HEIGHT; i++) {
-    rgbPixels[i * 3] = pixels[i * 4];         // R
-    rgbPixels[i * 3 + 1] = pixels[i * 4 + 1]; // G  
-    rgbPixels[i * 3 + 2] = pixels[i * 4 + 2]; // B
+async function renderAnimation() {
+  for (let frame = 0; frame < TOTAL_FRAMES; frame++) {
+    const progress = frame / (TOTAL_FRAMES - 1);
+    const easedProgress = easeInOutCubic(progress);
+    
+    const x = CONFIG.MARGIN + (easedProgress * MOVE_DISTANCE);
+    const y = CONFIG.HEIGHT / 2;
+    const rotation = easedProgress * Math.PI * 2 * CONFIG.ROTATIONS;
+    
+    ctx.fillStyle = CONFIG.BACKGROUND_COLOR;
+    ctx.fillRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+    drawTriangle(x, y, CONFIG.TRIANGLE_SIZE, rotation);
+    
+    const imageData = ctx.getImageData(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+    const rgbaPixels = imageData.data;
+    
+    const rgbPixels = new Uint8Array(CONFIG.WIDTH * CONFIG.HEIGHT * 3);
+    for (let i = 0; i < CONFIG.WIDTH * CONFIG.HEIGHT; i++) {
+      const rgbaIndex = i * 4;
+      const rgbIndex = i * 3;
+      rgbPixels[rgbIndex] = rgbaPixels[rgbaIndex];
+      rgbPixels[rgbIndex + 1] = rgbaPixels[rgbaIndex + 1];
+      rgbPixels[rgbIndex + 2] = rgbaPixels[rgbaIndex + 2];
+    }
+    
+    await writeFrame(Buffer.from(rgbPixels));
   }
   
-  // Write frame to FFmpeg stdin
-  ffmpegProcess.stdin.write(Buffer.from(rgbPixels));
-  
-  console.log(`Frame ${frame + 1}/${TOTAL_FRAMES} rendered`);
+  ffmpegProcess.stdin.end();
 }
 
-// Close FFmpeg stdin
-ffmpegProcess.stdin.end();
+renderAnimation();
