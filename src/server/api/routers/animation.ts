@@ -1,7 +1,8 @@
+// src/server/api/routers/animation.ts
 import { z } from "zod";
 import { createTRPCRouter, publicProcedure } from "@/server/api/trpc";
-import { latexToSvg, parseSVGContent } from "@/animation/anim-utils/latex-parser";
-import { generateTriangleAnimation, DEFAULT_CONFIG, type AnimationConfig } from "@/animation/triangle-generator";
+import { latexToSvg, parseSVGContent } from "@/animation/renderer/latex-renderer";
+import { generateTriangleAnimation, DEFAULT_CONFIG, type TriangleAnimationConfig } from "@/animation/triangle-generator";
 
 const animationConfigSchema = z.object({
   width: z.number().optional(),
@@ -32,7 +33,7 @@ export const animationRouter = createTRPCRouter({
         const latexData = parseSVGContent(svgContent);
         
         // Merge user config with defaults
-        const config: AnimationConfig = {
+        const config: TriangleAnimationConfig = {
           ...DEFAULT_CONFIG,
           ...input.config,
         };

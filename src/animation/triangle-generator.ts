@@ -1,11 +1,12 @@
-import { createCanvas } from 'canvas';
-import type { CanvasRenderingContext2D as NodeCanvasCtx } from 'canvas';
-import { spawn } from 'child_process';
-import fs from 'fs';
+// src/animation/triangle-generator.ts
 import path from 'path';
-import { type ParsedLatex, renderLatex } from "@/animation/anim-utils/latex-parser";
+import type { ParsedLatex } from './types';
+import { FrameGenerator, type FrameConfig } from './renderer/frame-generator';
+import { drawTriangle, type TriangleStyle } from './geometry/triangle';
+import { renderLatex } from './renderer/latex-renderer';
+import { easeInOutCubic } from './core/interpolation';
 
-export interface AnimationConfig {
+export interface TriangleAnimationConfig {
   width: number;
   height: number;
   fps: number;
@@ -21,7 +22,7 @@ export interface AnimationConfig {
   videoCrf: number;
 }
 
-export const DEFAULT_CONFIG: AnimationConfig = {
+export const DEFAULT_CONFIG: TriangleAnimationConfig = {
   width: 1920,
   height: 1080,
   fps: 120,
@@ -37,61 +38,10 @@ export const DEFAULT_CONFIG: AnimationConfig = {
   videoCrf: 18
 };
 
-export function easeInOutCubic(t: number): number {
-  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-}
-
-function drawTriangle(
-  ctx: NodeCanvasCtx,
-  x: number,
-  y: number,
-  size: number,
-  rotation: number,
-  config: AnimationConfig
-): void {
-  ctx.save();
-  ctx.translate(Math.round(x), Math.round(y));
-  ctx.rotate(rotation);
-  ctx.fillStyle = config.triangleColor;
-  ctx.strokeStyle = config.strokeColor;
-  ctx.lineWidth = config.strokeWidth;
-  ctx.beginPath();
-  ctx.moveTo(0, -size);
-  ctx.lineTo(-size * 0.866, size * 0.5);
-  ctx.lineTo(size * 0.866, size * 0.5);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-  ctx.restore();
-}
-
-function writeFrame(
-  ffmpegProcess: ReturnType<typeof spawn>,
-  frameData: Buffer
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (ffmpegProcess.stdin?.write(frameData)) {
-      resolve();
-    } else {
-      const onDrain = () => {
-        ffmpegProcess.stdin?.removeListener('error', onError);
-        resolve();
-      };
-      const onError = (error: unknown) => {
-        ffmpegProcess.stdin?.removeListener('drain', onDrain);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      };
-
-      ffmpegProcess.stdin?.once('drain', onDrain);
-      ffmpegProcess.stdin?.once('error', onError);
-    }
-  });
-}
-
 export async function generateTriangleAnimation(
   latexData: ParsedLatex,
   equation: string,
-  config: AnimationConfig = DEFAULT_CONFIG
+  config: TriangleAnimationConfig = DEFAULT_CONFIG
 ): Promise<string> {
   const outputDir = path.join(process.cwd(), 'public', 'animations');
   const filename = `triangle_${Date.now()}_${Math.random()
@@ -99,105 +49,49 @@ export async function generateTriangleAnimation(
     .substr(2, 9)}.mp4`;
   const outputPath = path.join(outputDir, filename);
 
-  // Ensure output directory exists
-  if (!fs.existsSync(outputDir)) {
-    fs.mkdirSync(outputDir, { recursive: true });
-  }
+  const frameConfig: FrameConfig = {
+    width: config.width,
+    height: config.height,
+    fps: config.fps,
+    duration: config.duration,
+    backgroundColor: config.backgroundColor
+  };
 
-  const { width, height, fps, duration } = config;
-  const TOTAL_FRAMES = fps * duration;
-  const MOVE_DISTANCE = width - config.margin * 2;
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext('2d') as unknown as NodeCanvasCtx;
+  const frameGenerator = new FrameGenerator(frameConfig, easeInOutCubic);
 
-  return new Promise((resolve, reject) => {
-    const ffmpegProcess = spawn('ffmpeg', [
-      '-f',
-      'rawvideo',
-      '-pix_fmt',
-      'rgb24',
-      '-s',
-      `${width}x${height}`,
-      '-r',
-      fps.toString(),
-      '-i',
-      'pipe:0',
-      '-pix_fmt',
-      'yuv420p',
-      '-c:v',
-      'libx264',
-      '-preset',
-      config.videoPreset,
-      '-crf',
-      config.videoCrf.toString(),
-      '-y',
-      outputPath
-    ]);
+  const triangleStyle: TriangleStyle = {
+    fillColor: config.triangleColor,
+    strokeColor: config.strokeColor,
+    strokeWidth: config.strokeWidth
+  };
 
-    ffmpegProcess.on('error', (error) => {
-      reject(
-        new Error(
-          `FFmpeg failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        )
+  await frameGenerator.generateAnimation(
+    outputPath,
+    (ctx, frame, frameConfig) => {
+      const MOVE_DISTANCE = frameConfig.width - config.margin * 2;
+      
+      // Calculate triangle position and rotation
+      const x = config.margin + frame.easedProgress * MOVE_DISTANCE;
+      const y = frameConfig.height / 2;
+      const rotation = frame.easedProgress * Math.PI * 2 * config.rotations;
+
+      // Draw triangle
+      drawTriangle(ctx, { x, y }, config.triangleSize, rotation, triangleStyle);
+
+      // Render LaTeX equation
+      renderLatex(
+        ctx as unknown as CanvasRenderingContext2D, 
+        latexData, 
+        frameConfig.width / 2 + 500, 
+        frameConfig.height / 2 - 200, 
+        8
       );
-    });
+    },
+    {
+      preset: config.videoPreset,
+      crf: config.videoCrf
+    }
+  );
 
-    ffmpegProcess.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`FFmpeg exited with code ${code}`));
-      } else {
-        resolve(`/animations/${filename}`);
-      }
-    });
-
-    // Start the async producer and explicitly handle its promise
-    // to satisfy both no-misused-promises and no-floating-promises.
-    const producer = (async () => {
-      for (let frame = 0; frame < TOTAL_FRAMES; frame++) {
-        const progress = frame / (TOTAL_FRAMES - 1);
-        const easedProgress = easeInOutCubic(progress);
-
-        const x = config.margin + easedProgress * MOVE_DISTANCE;
-        const y = height / 2;
-        const rotation = easedProgress * Math.PI * 2 * config.rotations;
-
-        // Clear canvas
-        ctx.fillStyle = config.backgroundColor;
-        ctx.fillRect(0, 0, width, height);
-
-        // Draw triangle
-        drawTriangle(ctx, x, y, config.triangleSize, rotation, config);
-
-        // Render LaTeX equation
-        // If the declared type in latex-parser expects a DOM ctx,
-        // widen it in that module (recommended) or overload there.
-        renderLatex(ctx as unknown as CanvasRenderingContext2D, latexData, width / 2 + 500, height / 2 - 200, 8);
-
-        // Convert to RGB buffer
-        const imageData = ctx.getImageData(0, 0, width, height);
-        const pixelCount = width * height;
-        const rgbPixels = new Uint8Array(pixelCount * 3);
-
-        for (let i = 0; i < pixelCount; i++) {
-          const rgbaIndex = i * 4;
-          const rgbIndex = i * 3;
-          rgbPixels[rgbIndex] = imageData.data[rgbaIndex]!;
-          rgbPixels[rgbIndex + 1] = imageData.data[rgbaIndex + 1]!;
-          rgbPixels[rgbIndex + 2] = imageData.data[rgbaIndex + 2]!;
-        }
-
-        await writeFrame(ffmpegProcess, Buffer.from(rgbPixels));
-      }
-
-      ffmpegProcess.stdin?.end();
-    })();
-
-    producer.catch((error) => {
-      ffmpegProcess.kill();
-      const err = error instanceof Error ? error : new Error(String(error));
-      reject(err);
-    });
-  });
+  return `/animations/${filename}`;
 }

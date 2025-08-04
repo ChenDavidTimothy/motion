@@ -1,60 +1,12 @@
+// src/animation/renderer/latex-renderer.ts
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
+import type { ParsedLatex, ParsedGlyph, ParsedTextElement, ParsedPathElement, ParsedLineElement, ParsedRectElement, NodeCanvasContext } from '../types';
 
 const execAsync = promisify(exec);
 
-// --- INTERFACES (Original) ---
-export interface ParsedGlyph {
-  width: number;
-  path: string;
-}
-
-export interface ParsedTextElement {
-  x: number;
-  y: number;
-  content: string;
-}
-
-export interface ParsedPathElement {
-  d: string;
-  stroke?: string;
-  strokeWidth?: number;
-  fill?: string;
-  transform?: string;
-}
-
-export interface ParsedLineElement {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-  stroke?: string;
-  strokeWidth?: number;
-  transform?: string;
-}
-
-export interface ParsedRectElement {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  fill?: string;
-  stroke?: string;
-  strokeWidth?: number;
-  transform?: string;
-}
-
-export interface ParsedLatex {
-  glyphs: Map<string, ParsedGlyph>;
-  textElements: ParsedTextElement[];
-  pathElements: ParsedPathElement[];
-  lineElements: ParsedLineElement[];
-  rectElements: ParsedRectElement[];
-}
-
-// --- latexToSvg (Original) ---
 export async function latexToSvg(equation: string): Promise<string> {
   const tempDir = path.join(process.cwd(), 'temp', `latex_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
   
@@ -96,15 +48,11 @@ $\\displaystyle ${cleanEquation}$
   }
 }
 
-// --- PARSING HELPERS (Corrected) ---
 function parseAttributeValue(tag: string, attribute: string): string | undefined {
-  // FIX: Use RegExp#exec() instead of String#match.
   const match = new RegExp(`${attribute}=['"]([^'"]*)['"]|${attribute}=([^\\s>]*)`).exec(tag);
-  // FIX: Use nullish coalescing '??' for safer access.
   return match?.[1] ?? match?.[2];
 }
 
-// FIX: Changed return type to number | undefined to allow for safer checks at call sites.
 function parseNumericAttribute(tag: string, attribute: string): number | undefined {
   const value = parseAttributeValue(tag, attribute);
   if (value === undefined) {
@@ -114,7 +62,6 @@ function parseNumericAttribute(tag: string, attribute: string): number | undefin
   return isNaN(num) ? undefined : num;
 }
 
-// --- parseSVGContent (Corrected) ---
 export function parseSVGContent(svgContent: string): ParsedLatex {
   const glyphs = new Map<string, ParsedGlyph>();
   const textElements: ParsedTextElement[] = [];
@@ -125,7 +72,6 @@ export function parseSVGContent(svgContent: string): ParsedLatex {
   for (const match of svgContent.matchAll(/<glyph[^>]*>/gs)) {
     const tag = match[0];
     const unicode = parseAttributeValue(tag, 'unicode');
-    // FIX: Use '??' for safer default value. This now correctly handles a width of 0.
     const width = parseNumericAttribute(tag, 'horiz-adv-x') ?? 500;
     const pathData = parseAttributeValue(tag, 'd');
     
@@ -135,10 +81,8 @@ export function parseSVGContent(svgContent: string): ParsedLatex {
   }
   
   for (const match of svgContent.matchAll(/<text[^>]*>.*?<\/text>/gs)) {
-    // FIX: Add '?? 0' to keep original behavior of defaulting to 0.
     const x = parseNumericAttribute(match[0], 'x') ?? 0;
     const y = parseNumericAttribute(match[0], 'y') ?? 0;
-    // FIX: Use RegExp#exec() for consistency.
     const content = />([^<]+)</.exec(match[0])?.[1];
     
     if (content) {
@@ -191,11 +135,9 @@ export function parseSVGContent(svgContent: string): ParsedLatex {
   return { glyphs, textElements, pathElements, lineElements, rectElements };
 }
 
-// --- RENDER HELPERS (Corrected) ---
-function applyTransform(ctx: CanvasRenderingContext2D, transform?: string): void {
+function applyTransform(ctx: NodeCanvasContext | CanvasRenderingContext2D, transform?: string): void {
   if (!transform) return;
   
-  // FIX: Use exec() and add safety checks for captured groups.
   const translateMatch = /translate\(([^,]+),([^)]+)\)/.exec(transform);
   if (translateMatch?.[1] && translateMatch?.[2]) {
     ctx.translate(parseFloat(translateMatch[1]), parseFloat(translateMatch[2]));
@@ -214,7 +156,7 @@ function applyTransform(ctx: CanvasRenderingContext2D, transform?: string): void
   }
 }
 
-export function renderSVGPath(ctx: CanvasRenderingContext2D, pathData: string): void {
+export function renderSVGPath(ctx: NodeCanvasContext | CanvasRenderingContext2D, pathData: string): void {
   if (!pathData) return;
   
   const commands: string[] = [];
@@ -232,14 +174,12 @@ export function renderSVGPath(ctx: CanvasRenderingContext2D, pathData: string): 
   let currentX = 0, currentY = 0, startX = 0, startY = 0, lastControlX = 0, lastControlY = 0;
   
   for (const command of commands) {
-    // FIX: Add guard against empty strings to prevent 'type' from being undefined.
     if (!command) continue;
 
     const type = command[0]!;
     const isRelative = type === type.toLowerCase();
     const coords = [...command.slice(1).trim().matchAll(/-?\d*\.?\d+/g)].map(m => parseFloat(m[0]));
     
-    // FIX: Add length checks and non-null assertions (!) to ensure type safety.
     switch (type.toUpperCase()) {
       case 'M':
         if (coords.length >= 2) {
@@ -321,9 +261,8 @@ export function renderSVGPath(ctx: CanvasRenderingContext2D, pathData: string): 
   }
 }
 
-// --- renderLatex (Corrected) ---
 export function renderLatex(
-  ctx: CanvasRenderingContext2D, 
+  ctx: NodeCanvasContext | CanvasRenderingContext2D, 
   latexData: ParsedLatex, 
   x: number, 
   y: number, 
@@ -347,7 +286,6 @@ export function renderLatex(
     
     if (pathElement.stroke && pathElement.stroke !== 'none') {
       ctx.strokeStyle = pathElement.stroke;
-      // FIX: Use nullish coalescing for safer defaults.
       ctx.lineWidth = pathElement.strokeWidth ?? 1;
       ctx.stroke();
     } else if (!pathElement.fill || pathElement.fill === 'none') {
@@ -365,7 +303,6 @@ export function renderLatex(
     ctx.moveTo(lineElement.x1, lineElement.y1);
     ctx.lineTo(lineElement.x2, lineElement.y2);
     
-    // FIX: Use '??' for safer defaults.
     ctx.strokeStyle = lineElement.stroke ?? '#ffffff';
     ctx.lineWidth = lineElement.strokeWidth ?? 1;
     ctx.stroke();
@@ -394,7 +331,6 @@ export function renderLatex(
     ctx.restore();
   }
   
-  // FIX: Removed inferrable types.
   let minX = Infinity, maxX = -Infinity;
   for (const textElement of textElements) {
     let charX = textElement.x;
