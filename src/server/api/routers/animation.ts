@@ -56,14 +56,77 @@ const sceneObjectSchema = z.object({
   initialOpacity: z.number().min(0).max(1).optional(),
 });
 
-const animationTrackSchema = z.object({
-  objectId: z.string(),
-  type: z.enum(['move', 'rotate', 'scale', 'fade', 'color']),
-  startTime: z.number().min(0),
-  duration: z.number().min(0),
-  easing: z.enum(['linear', 'easeInOut', 'easeIn', 'easeOut']),
-  properties: z.record(z.any()),
+// Animation property schemas
+const moveAnimationSchema = z.object({
+  from: point2DSchema,
+  to: point2DSchema,
 });
+
+const rotateAnimationSchema = z.object({
+  from: z.number(),
+  to: z.number(),
+  rotations: z.number().optional(),
+});
+
+const scaleAnimationSchema = z.object({
+  from: z.union([point2DSchema, z.number()]),
+  to: z.union([point2DSchema, z.number()]),
+});
+
+const fadeAnimationSchema = z.object({
+  from: z.number().min(0).max(1),
+  to: z.number().min(0).max(1),
+});
+
+const colorAnimationSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+  property: z.enum(['fill', 'stroke']),
+});
+
+// Discriminated union for animation tracks
+const animationTrackSchema = z.discriminatedUnion('type', [
+  z.object({
+    objectId: z.string(),
+    type: z.literal('move'),
+    startTime: z.number().min(0),
+    duration: z.number().min(0),
+    easing: z.enum(['linear', 'easeInOut', 'easeIn', 'easeOut']),
+    properties: moveAnimationSchema,
+  }),
+  z.object({
+    objectId: z.string(),
+    type: z.literal('rotate'),
+    startTime: z.number().min(0),
+    duration: z.number().min(0),
+    easing: z.enum(['linear', 'easeInOut', 'easeIn', 'easeOut']),
+    properties: rotateAnimationSchema,
+  }),
+  z.object({
+    objectId: z.string(),
+    type: z.literal('scale'),
+    startTime: z.number().min(0),
+    duration: z.number().min(0),
+    easing: z.enum(['linear', 'easeInOut', 'easeIn', 'easeOut']),
+    properties: scaleAnimationSchema,
+  }),
+  z.object({
+    objectId: z.string(),
+    type: z.literal('fade'),
+    startTime: z.number().min(0),
+    duration: z.number().min(0),
+    easing: z.enum(['linear', 'easeInOut', 'easeIn', 'easeOut']),
+    properties: fadeAnimationSchema,
+  }),
+  z.object({
+    objectId: z.string(),
+    type: z.literal('color'),
+    startTime: z.number().min(0),
+    duration: z.number().min(0),
+    easing: z.enum(['linear', 'easeInOut', 'easeIn', 'easeOut']),
+    properties: colorAnimationSchema,
+  }),
+]);
 
 const latexElementSchema = z.object({
   equation: z.string(),

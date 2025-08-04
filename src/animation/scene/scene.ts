@@ -1,6 +1,7 @@
 // src/animation/scene/scene.ts
 import type { Point2D } from '../types';
 
+
 export interface AnimationScene {
   duration: number;
   objects: SceneObject[];

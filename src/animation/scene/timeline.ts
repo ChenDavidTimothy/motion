@@ -4,13 +4,18 @@ import type {
   AnimationTrack, 
   ObjectState, 
   SceneObject,
-  Point2D,
   MoveAnimation,
   RotateAnimation,
   ScaleAnimation,
   FadeAnimation,
-  ColorAnimation
+  ColorAnimation,
+  GeometryProperties,
+  TriangleProperties,
+  CircleProperties,
+  RectangleProperties
 } from './scene';
+
+import type { Point2D } from '../types';
 import { 
   linear, 
   easeInOutCubic, 
@@ -19,6 +24,9 @@ import {
   lerp,
   lerpPoint 
 } from '../core/interpolation';
+
+type EasingType = 'linear' | 'easeInOut' | 'easeIn' | 'easeOut';
+type AnimationValue = Point2D | number | string | null;
 
 // Get easing function by name
 function getEasingFunction(easing: string) {
@@ -56,7 +64,7 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
 }
 
 // Evaluate a single animation track at a specific time
-function evaluateAnimation(animation: AnimationTrack, time: number): any {
+function evaluateAnimation(animation: AnimationTrack, time: number): AnimationValue {
   const animationEndTime = animation.startTime + animation.duration;
   
   // Animation hasn't started yet
@@ -78,7 +86,7 @@ function evaluateAnimation(animation: AnimationTrack, time: number): any {
   return interpolateAnimation(animation, easedProgress);
 }
 
-function getAnimationEndValue(animation: AnimationTrack): any {
+function getAnimationEndValue(animation: AnimationTrack): AnimationValue {
   switch (animation.type) {
     case 'move':
       return (animation.properties as MoveAnimation).to;
@@ -98,7 +106,7 @@ function getAnimationEndValue(animation: AnimationTrack): any {
   }
 }
 
-function interpolateAnimation(animation: AnimationTrack, progress: number): any {
+function interpolateAnimation(animation: AnimationTrack, progress: number): AnimationValue {
   switch (animation.type) {
     case 'move': {
       const props = animation.properties as MoveAnimation;
@@ -137,6 +145,19 @@ function interpolateAnimation(animation: AnimationTrack, progress: number): any 
   }
 }
 
+function getStrokeColor(properties: GeometryProperties, objectType: string): string | undefined {
+  switch (objectType) {
+    case 'triangle':
+      return (properties as TriangleProperties).strokeColor;
+    case 'circle':
+      return (properties as CircleProperties).strokeColor;
+    case 'rectangle':
+      return (properties as RectangleProperties).strokeColor;
+    default:
+      return undefined;
+  }
+}
+
 // Get the state of an object at a specific time
 export function getObjectStateAtTime(
   object: SceneObject, 
@@ -151,7 +172,7 @@ export function getObjectStateAtTime(
     opacity: object.initialOpacity ?? 1,
     colors: {
       fill: object.properties.color,
-      stroke: (object.properties as any).strokeColor
+      stroke: getStrokeColor(object.properties, object.type)
     }
   };
   
@@ -208,14 +229,14 @@ export function createMoveAnimation(
   to: Point2D,
   startTime: number,
   duration: number,
-  easing: string = 'easeInOut'
+  easing = 'easeInOut'
 ): AnimationTrack {
   return {
     objectId,
     type: 'move',
     startTime,
     duration,
-    easing: easing as any,
+    easing: easing as EasingType,
     properties: { from, to }
   };
 }
@@ -225,14 +246,14 @@ export function createRotateAnimation(
   rotations: number,
   startTime: number,
   duration: number,
-  easing: string = 'linear'
+  easing = 'linear'
 ): AnimationTrack {
   return {
     objectId,
     type: 'rotate',
     startTime,
     duration,
-    easing: easing as any,
+    easing: easing as EasingType,
     properties: { from: 0, to: 0, rotations }
   };
 }
@@ -243,14 +264,14 @@ export function createScaleAnimation(
   to: number,
   startTime: number,
   duration: number,
-  easing: string = 'easeInOut'
+  easing = 'easeInOut'
 ): AnimationTrack {
   return {
     objectId,
     type: 'scale',
     startTime,
     duration,
-    easing: easing as any,
+    easing: easing as EasingType,
     properties: { from, to }
   };
 }
