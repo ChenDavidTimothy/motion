@@ -82,7 +82,7 @@ export async function generateTriangleAnimation(
       renderLatex(
         ctx as unknown as CanvasRenderingContext2D, 
         latexData, 
-        frameConfig.width / 2 + 500, 
+        frameConfig.width / 2 - 1000, 
         frameConfig.height / 2 - 200, 
         8
       );

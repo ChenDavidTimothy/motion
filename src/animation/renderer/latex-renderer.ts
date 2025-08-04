@@ -8,13 +8,6 @@ import type { ParsedLatex, ParsedGlyph, ParsedTextElement, ParsedPathElement, No
 
 const execAsync = promisify(exec);
 
-// Constants
-const DEFAULT_GLYPH_WIDTH = 500;
-const GLYPH_SCALE_FACTOR = 0.01;
-const FALLBACK_FONT = '12px serif';
-const FALLBACK_CHAR_WIDTH = 6;
-const DEFAULT_STROKE_WIDTH = 1;
-
 export async function latexToSvg(equation: string): Promise<string> {
   const tempDir = path.join(os.tmpdir(), `latex_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
   
@@ -23,7 +16,6 @@ export async function latexToSvg(equation: string): Promise<string> {
   }
   
   try {
-    // Remove outer delimiters only - no character sanitization
     const cleanEquation = equation
       .replace(/^\\\[/, '')
       .replace(/\\\]$/, '')
@@ -48,36 +40,22 @@ $\\displaystyle ${cleanEquation}$
     
     fs.writeFileSync(path.join(tempDir, 'eq.tex'), latexContent);
     
-    try {
-      await execAsync('latex -interaction=nonstopmode eq.tex', { 
-        cwd: tempDir,
-        timeout: 30000
-      });
-    } catch (error: unknown) {
-      const logPath = path.join(tempDir, 'eq.log');
-      let logContent = '';
-      if (fs.existsSync(logPath)) {
-        logContent = fs.readFileSync(logPath, 'utf8');
-      }
-      throw new Error(`LaTeX compilation failed: ${error instanceof Error ? error.message : String(error)}${logContent ? '\nLog: ' + logContent.slice(-500) : ''}`);
-    }
+    await execAsync('latex -interaction=nonstopmode eq.tex', { 
+      cwd: tempDir,
+      timeout: 30000
+    });
     
-    try {
-      await execAsync('dvisvgm eq.dvi -o eq.svg', { 
-        cwd: tempDir,
-        timeout: 30000
-      });
-    } catch (error) {
-      throw new Error(`SVG conversion failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
+    await execAsync('dvisvgm eq.dvi -o eq.svg', { 
+      cwd: tempDir,
+      timeout: 30000
+    });
     
     const svgPath = path.join(tempDir, 'eq.svg');
     if (!fs.existsSync(svgPath)) {
       throw new Error('SVG file was not generated');
     }
     
-    const svgContent = fs.readFileSync(svgPath, 'utf8');
-    return svgContent;
+    return fs.readFileSync(svgPath, 'utf8');
   } finally {
     if (fs.existsSync(tempDir)) {
       try {
@@ -104,125 +82,140 @@ function parseAttribute<T = string>(
   return parsed !== undefined && !Number.isNaN(parsed) ? parsed : undefined;
 }
 
-function parseElements<T>(
-  svgContent: string,
-  regex: RegExp,
-  parser: (tag: string) => T
-): T[] {
-  const elements: T[] = [];
-  try {
-    for (const match of svgContent.matchAll(regex)) {
-      const element = parser(match[0]);
-      if (element) elements.push(element);
-    }
-  } catch {
-    console.warn(`Error parsing elements`);
-  }
-  return elements;
-}
-
-function getCoords(coords: number[], startIndex: number, count: number): number[] | null {
-  if (coords.length < startIndex + count) return null;
-  return coords.slice(startIndex, startIndex + count);
-}
-
 export function parseSVGContent(svgContent: string): ParsedLatex {
+  console.log('=== GLYPH PARSING START ===');
+  
   const glyphs = new Map<string, ParsedGlyph>();
   
-  // Parse glyphs with improved character mapping
+  // Parse ALL glyphs from SVG fonts
   try {
-    for (const match of svgContent.matchAll(/<glyph[^>]*>/gs)) {
+    const allGlyphMatches = [...svgContent.matchAll(/<glyph[^>]*>/gs)];
+    console.log(`Found ${allGlyphMatches.length} total glyph tags in SVG`);
+    
+    for (let i = 0; i < allGlyphMatches.length; i++) {
+      const match = allGlyphMatches[i];
       const tag = match[0];
       const unicode = parseAttribute(tag, 'unicode');
       const glyphName = parseAttribute(tag, 'glyph-name');
-      const width = parseAttribute(tag, 'horiz-adv-x', parseFloat) ?? DEFAULT_GLYPH_WIDTH;
+      const width = parseAttribute(tag, 'horiz-adv-x', parseFloat) ?? 500;
       const pathData = parseAttribute(tag, 'd');
+      
+      console.log(`Glyph ${i}: name="${glyphName}" unicode="${unicode || 'none'}" hasPath=${!!pathData}`);
       
       if (pathData) {
         if (unicode) {
           glyphs.set(unicode, { width, path: pathData });
+          console.log(`  -> Added by unicode: "${unicode}"`);
         }
-        if (glyphName && /^[a-zA-Z0-9]$/.test(glyphName)) {
+        if (glyphName) {
           glyphs.set(glyphName, { width, path: pathData });
+          console.log(`  -> Added by name: "${glyphName}"`);
         }
+      } else {
+        console.log(`  -> SKIPPED (no path data)`);
       }
     }
     
-    const basicChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    for (const char of basicChars) {
-      if (!glyphs.has(char)) {
-        glyphs.set(char, { width: DEFAULT_GLYPH_WIDTH, path: '' });
+    console.log(`=== GLYPH PARSING COMPLETE: ${glyphs.size} glyphs in map ===`);
+  } catch (error) {
+    console.error('Glyph parsing error:', error);
+  }
+  
+  // Parse text elements with mixed base text + tspan support
+  const textElements: ParsedTextElement[] = [];
+  try {
+    for (const match of svgContent.matchAll(/<text[^>]*>.*?<\/text>/gs)) {
+      const textTag = match[0];
+      const baseX = parseAttribute(textTag, 'x', parseFloat) ?? 0;
+      const baseY = parseAttribute(textTag, 'y', parseFloat) ?? 0;
+      
+      // Extract base text content (everything not in tspan)
+      let baseContent = textTag
+        .replace(/<text[^>]*>/, '')
+        .replace(/<\/text>/, '')
+        .replace(/<tspan[^>]*>.*?<\/tspan>/g, '')
+        .trim();
+      
+      // Add base text if it exists
+      if (baseContent) {
+        textElements.push({ x: baseX, y: baseY, content: baseContent });
+      }
+      
+      // Extract tspan elements with individual positioning
+      const tspanMatches = [...textTag.matchAll(/<tspan[^>]*>([^<]*)<\/tspan>/g)];
+      
+      for (const tspanMatch of tspanMatches) {
+        const tspanTag = tspanMatch[0];
+        const char = tspanMatch[1]?.trim();
+        if (char) {
+          const x = parseAttribute(tspanTag, 'x', parseFloat) ?? baseX;
+          const y = parseAttribute(tspanTag, 'y', parseFloat) ?? baseY;
+          textElements.push({ x, y, content: char });
+        }
       }
     }
   } catch (error) {
-    console.warn('Error parsing glyphs:', error);
+    console.warn('Error parsing text elements:', error);
   }
   
-  // Parse text elements with tspan support
-  const textElements = parseElements(
-    svgContent,
-    /<text[^>]*>.*?<\/text>/gs,
-    (tag) => {
-      const x = parseAttribute(tag, 'x', parseFloat) ?? 0;
-      const y = parseAttribute(tag, 'y', parseFloat) ?? 0;
-      
-      const fullContent = tag
-        .replace(/<text[^>]*>/, '')
-        .replace(/<\/text>/, '')
-        .replace(/<tspan[^>]*>/g, '')
-        .replace(/<\/tspan>/g, '')
-        .trim();
-      
-      return fullContent ? { x, y, content: fullContent } : null;
-    }
-  ).filter(Boolean) as ParsedTextElement[];
-  
   // Parse path elements
-  const pathElements = parseElements(
-    svgContent,
-    /<path[^>]*\/?>|<path[^>]*>.*?<\/path>/gs,
-    (tag) => {
+  const pathElements: ParsedPathElement[] = [];
+  try {
+    for (const match of svgContent.matchAll(/<path[^>]*\/?>|<path[^>]*>.*?<\/path>/gs)) {
+      const tag = match[0];
       const d = parseAttribute(tag, 'd');
-      return d ? {
-        d,
-        stroke: parseAttribute(tag, 'stroke'),
-        strokeWidth: parseAttribute(tag, 'stroke-width', parseFloat),
-        fill: parseAttribute(tag, 'fill'),
-        transform: parseAttribute(tag, 'transform')
-      } : null;
+      if (d) {
+        pathElements.push({
+          d,
+          stroke: parseAttribute(tag, 'stroke'),
+          strokeWidth: parseAttribute(tag, 'stroke-width', parseFloat),
+          fill: parseAttribute(tag, 'fill'),
+          transform: parseAttribute(tag, 'transform')
+        });
+      }
     }
-  ).filter(Boolean) as ParsedPathElement[];
+  } catch (error) {
+    console.warn('Error parsing path elements:', error);
+  }
   
   // Parse line elements
-  const lineElements = parseElements(
-    svgContent,
-    /<line[^>]*\/?>|<line[^>]*>.*?<\/line>/gs,
-    (tag) => ({
-      x1: parseAttribute(tag, 'x1', parseFloat) ?? 0,
-      y1: parseAttribute(tag, 'y1', parseFloat) ?? 0,
-      x2: parseAttribute(tag, 'x2', parseFloat) ?? 0,
-      y2: parseAttribute(tag, 'y2', parseFloat) ?? 0,
-      stroke: parseAttribute(tag, 'stroke'),
-      strokeWidth: parseAttribute(tag, 'stroke-width', parseFloat),
-      transform: parseAttribute(tag, 'transform')
-    })
-  );
+  const lineElements = [];
+  try {
+    for (const match of svgContent.matchAll(/<line[^>]*\/?>|<line[^>]*>.*?<\/line>/gs)) {
+      const tag = match[0];
+      lineElements.push({
+        x1: parseAttribute(tag, 'x1', parseFloat) ?? 0,
+        y1: parseAttribute(tag, 'y1', parseFloat) ?? 0,
+        x2: parseAttribute(tag, 'x2', parseFloat) ?? 0,
+        y2: parseAttribute(tag, 'y2', parseFloat) ?? 0,
+        stroke: parseAttribute(tag, 'stroke'),
+        strokeWidth: parseAttribute(tag, 'stroke-width', parseFloat),
+        transform: parseAttribute(tag, 'transform')
+      });
+    }
+  } catch (error) {
+    console.warn('Error parsing line elements:', error);
+  }
   
   // Parse rect elements
-  const rectElements = parseElements(
-    svgContent,
-    /<rect[^>]*\/?>|<rect[^>]*>.*?<\/rect>/gs,
-    (tag) => ({
-      x: parseAttribute(tag, 'x', parseFloat) ?? 0,
-      y: parseAttribute(tag, 'y', parseFloat) ?? 0,
-      width: parseAttribute(tag, 'width', parseFloat) ?? 0,
-      height: parseAttribute(tag, 'height', parseFloat) ?? 0,
-      fill: parseAttribute(tag, 'fill'),
-      stroke: parseAttribute(tag, 'stroke'),
-      strokeWidth: parseAttribute(tag, 'stroke-width', parseFloat),
-      transform: parseAttribute(tag, 'transform')
-    })
-  );
+  const rectElements = [];
+  try {
+    for (const match of svgContent.matchAll(/<rect[^>]*\/?>|<rect[^>]*>.*?<\/rect>/gs)) {
+      const tag = match[0];
+      rectElements.push({
+        x: parseAttribute(tag, 'x', parseFloat) ?? 0,
+        y: parseAttribute(tag, 'y', parseFloat) ?? 0,
+        width: parseAttribute(tag, 'width', parseFloat) ?? 0,
+        height: parseAttribute(tag, 'height', parseFloat) ?? 0,
+        fill: parseAttribute(tag, 'fill'),
+        stroke: parseAttribute(tag, 'stroke'),
+        strokeWidth: parseAttribute(tag, 'stroke-width', parseFloat),
+        transform: parseAttribute(tag, 'transform')
+      });
+    }
+  } catch (error) {
+    console.warn('Error parsing rect elements:', error);
+  }
   
   return { glyphs, textElements, pathElements, lineElements, rectElements };
 }
@@ -264,93 +257,77 @@ export function renderSVGPath(ctx: NodeCanvasContext | CanvasRenderingContext2D,
     const coords = [...command.slice(1).trim().matchAll(/-?\d*\.?\d+/g)].map(m => parseFloat(m[0]));
     
     switch (type.toUpperCase()) {
-      case 'M': {
-        const moveCoords = getCoords(coords, 0, 2);
-        if (moveCoords) {
-          currentX = isRelative ? currentX + moveCoords[0]! : moveCoords[0]!;
-          currentY = isRelative ? currentY + moveCoords[1]! : moveCoords[1]!;
+      case 'M':
+        if (coords.length >= 2) {
+          currentX = isRelative ? currentX + coords[0]! : coords[0]!;
+          currentY = isRelative ? currentY + coords[1]! : coords[1]!;
           startX = currentX; startY = currentY;
           ctx.moveTo(currentX, currentY);
         }
         break;
-      }
-      case 'L': {
-        const lineCoords = getCoords(coords, 0, 2);
-        if (lineCoords) {
-          currentX = isRelative ? currentX + lineCoords[0]! : lineCoords[0]!;
-          currentY = isRelative ? currentY + lineCoords[1]! : lineCoords[1]!;
+      case 'L':
+        if (coords.length >= 2) {
+          currentX = isRelative ? currentX + coords[0]! : coords[0]!;
+          currentY = isRelative ? currentY + coords[1]! : coords[1]!;
           ctx.lineTo(currentX, currentY);
         }
         break;
-      }
-      case 'H': {
-        const hCoords = getCoords(coords, 0, 1);
-        if (hCoords) {
-          currentX = isRelative ? currentX + hCoords[0]! : hCoords[0]!;
+      case 'H':
+        if (coords.length >= 1) {
+          currentX = isRelative ? currentX + coords[0]! : coords[0]!;
           ctx.lineTo(currentX, currentY);
         }
         break;
-      }
-      case 'V': {
-        const vCoords = getCoords(coords, 0, 1);
-        if (vCoords) {
-          currentY = isRelative ? currentY + vCoords[0]! : vCoords[0]!;
+      case 'V':
+        if (coords.length >= 1) {
+          currentY = isRelative ? currentY + coords[0]! : coords[0]!;
           ctx.lineTo(currentX, currentY);
         }
         break;
-      }
-      case 'C': {
-        const cubicCoords = getCoords(coords, 0, 6);
-        if (cubicCoords) {
-          const cp1x = isRelative ? currentX + cubicCoords[0]! : cubicCoords[0]!;
-          const cp1y = isRelative ? currentY + cubicCoords[1]! : cubicCoords[1]!;
-          const cp2x = isRelative ? currentX + cubicCoords[2]! : cubicCoords[2]!;
-          const cp2y = isRelative ? currentY + cubicCoords[3]! : cubicCoords[3]!;
-          currentX = isRelative ? currentX + cubicCoords[4]! : cubicCoords[4]!;
-          currentY = isRelative ? currentY + cubicCoords[5]! : cubicCoords[5]!;
+      case 'C':
+        if (coords.length >= 6) {
+          const cp1x = isRelative ? currentX + coords[0]! : coords[0]!;
+          const cp1y = isRelative ? currentY + coords[1]! : coords[1]!;
+          const cp2x = isRelative ? currentX + coords[2]! : coords[2]!;
+          const cp2y = isRelative ? currentY + coords[3]! : coords[3]!;
+          currentX = isRelative ? currentX + coords[4]! : coords[4]!;
+          currentY = isRelative ? currentY + coords[5]! : coords[5]!;
           ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, currentX, currentY);
           lastControlX = cp2x; lastControlY = cp2y;
         }
         break;
-      }
-      case 'S': {
-        const smoothCoords = getCoords(coords, 0, 4);
-        if (smoothCoords) {
+      case 'S':
+        if (coords.length >= 4) {
           const scp1x = 2 * currentX - lastControlX;
           const scp1y = 2 * currentY - lastControlY;
-          const scp2x = isRelative ? currentX + smoothCoords[0]! : smoothCoords[0]!;
-          const scp2y = isRelative ? currentY + smoothCoords[1]! : smoothCoords[1]!;
-          currentX = isRelative ? currentX + smoothCoords[2]! : smoothCoords[2]!;
-          currentY = isRelative ? currentY + smoothCoords[3]! : smoothCoords[3]!;
+          const scp2x = isRelative ? currentX + coords[0]! : coords[0]!;
+          const scp2y = isRelative ? currentY + coords[1]! : coords[1]!;
+          currentX = isRelative ? currentX + coords[2]! : coords[2]!;
+          currentY = isRelative ? currentY + coords[3]! : coords[3]!;
           ctx.bezierCurveTo(scp1x, scp1y, scp2x, scp2y, currentX, currentY);
           lastControlX = scp2x; lastControlY = scp2y;
         }
         break;
-      }
-      case 'Q': {
-        const quadCoords = getCoords(coords, 0, 4);
-        if (quadCoords) {
-          const qcp1x = isRelative ? currentX + quadCoords[0]! : quadCoords[0]!;
-          const qcp1y = isRelative ? currentY + quadCoords[1]! : quadCoords[1]!;
-          currentX = isRelative ? currentX + quadCoords[2]! : quadCoords[2]!;
-          currentY = isRelative ? currentY + quadCoords[3]! : quadCoords[3]!;
+      case 'Q':
+        if (coords.length >= 4) {
+          const qcp1x = isRelative ? currentX + coords[0]! : coords[0]!;
+          const qcp1y = isRelative ? currentY + coords[1]! : coords[1]!;
+          currentX = isRelative ? currentX + coords[2]! : coords[2]!;
+          currentY = isRelative ? currentY + coords[3]! : coords[3]!;
           ctx.quadraticCurveTo(qcp1x, qcp1y, currentX, currentY);
           lastControlX = qcp1x; lastControlY = qcp1y;
         }
         break;
-      }
-      case 'T': {
-        const smoothQuadCoords = getCoords(coords, 0, 2);
-        if (smoothQuadCoords) {
+      case 'T':
+        if (coords.length >= 2) {
           const tcp1x = 2 * currentX - lastControlX;
           const tcp1y = 2 * currentY - lastControlY;
-          currentX = isRelative ? currentX + smoothQuadCoords[0]! : smoothQuadCoords[0]!;
-          currentY = isRelative ? currentY + smoothQuadCoords[1]! : smoothQuadCoords[1]!;
+          currentX = isRelative ? currentX + coords[0]! : coords[0]!;
+          currentY = isRelative ? currentY + coords[1]! : coords[1]!;
           ctx.quadraticCurveTo(tcp1x, tcp1y, currentX, currentY);
           lastControlX = tcp1x; lastControlY = tcp1y;
         }
         break;
-      }
       case 'Z':
         ctx.lineTo(startX, startY);
         ctx.closePath();
@@ -360,6 +337,7 @@ export function renderSVGPath(ctx: NodeCanvasContext | CanvasRenderingContext2D,
   }
 }
 
+// Native SVG positioning - no artificial modifications
 export function renderLatex(
   ctx: NodeCanvasContext | CanvasRenderingContext2D, 
   latexData: ParsedLatex, 
@@ -367,13 +345,12 @@ export function renderLatex(
   y: number, 
   scale = 1
 ): void {
-  const { glyphs, textElements, pathElements, lineElements, rectElements } = latexData;
-  
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(scale, scale);
   
-  for (const pathElement of pathElements) {
+  // Render paths at ORIGINAL SVG coordinates
+  for (const pathElement of latexData.pathElements) {
     ctx.save();
     applyTransform(ctx, pathElement.transform);
     renderSVGPath(ctx, pathElement.d);
@@ -385,7 +362,7 @@ export function renderLatex(
     
     if (pathElement.stroke && pathElement.stroke !== 'none') {
       ctx.strokeStyle = pathElement.stroke;
-      ctx.lineWidth = pathElement.strokeWidth ?? DEFAULT_STROKE_WIDTH;
+      ctx.lineWidth = pathElement.strokeWidth ?? 1;
       ctx.stroke();
     } else if (!pathElement.fill || pathElement.fill === 'none') {
       ctx.fillStyle = '#ffffff';
@@ -395,7 +372,8 @@ export function renderLatex(
     ctx.restore();
   }
   
-  for (const lineElement of lineElements) {
+  // Render lines at ORIGINAL SVG coordinates
+  for (const lineElement of latexData.lineElements) {
     ctx.save();
     applyTransform(ctx, lineElement.transform);
     ctx.beginPath();
@@ -403,13 +381,14 @@ export function renderLatex(
     ctx.lineTo(lineElement.x2, lineElement.y2);
     
     ctx.strokeStyle = lineElement.stroke ?? '#ffffff';
-    ctx.lineWidth = lineElement.strokeWidth ?? DEFAULT_STROKE_WIDTH;
+    ctx.lineWidth = lineElement.strokeWidth ?? 1;
     ctx.stroke();
     
     ctx.restore();
   }
   
-  for (const rectElement of rectElements) {
+  // Render rectangles at ORIGINAL SVG coordinates
+  for (const rectElement of latexData.rectElements) {
     ctx.save();
     applyTransform(ctx, rectElement.transform);
     
@@ -420,7 +399,7 @@ export function renderLatex(
     
     if (rectElement.stroke && rectElement.stroke !== 'none') {
       ctx.strokeStyle = rectElement.stroke;
-      ctx.lineWidth = rectElement.strokeWidth ?? DEFAULT_STROKE_WIDTH;
+      ctx.lineWidth = rectElement.strokeWidth ?? 1;
       ctx.strokeRect(rectElement.x, rectElement.y, rectElement.width, rectElement.height);
     } else if (!rectElement.fill || rectElement.fill === 'none') {
       ctx.fillStyle = '#ffffff';
@@ -430,46 +409,62 @@ export function renderLatex(
     ctx.restore();
   }
   
-  let minX = Infinity, maxX = -Infinity;
-  for (const textElement of textElements) {
-    let charX = textElement.x;
-    for (const char of textElement.content) {
-      const glyph = glyphs.get(char);
-      if (glyph) {
-        minX = Math.min(minX, charX);
-        maxX = Math.max(maxX, charX + glyph.width * GLYPH_SCALE_FACTOR);
-        charX += glyph.width * GLYPH_SCALE_FACTOR;
-      }
-    }
-  }
-  
-  const centerOffset = minX !== Infinity ? -(minX + maxX) / 2 : 0;
-  
-  for (const textElement of textElements) {
-    let charX = textElement.x + centerOffset;
-    
-    for (const char of textElement.content) {
-      const glyph = glyphs.get(char);
+  // Render text at EXACT SVG coordinates
+  for (const textElement of latexData.textElements) {
+    if (textElement.content.length === 1) {
+      // Single character with exact position
+      const char = textElement.content;
+      const glyph = latexData.glyphs.get(char);
+      
+      ctx.save();
+      ctx.translate(textElement.x, textElement.y);
+      ctx.scale(0.01, -0.01);
+      
       if (glyph?.path) {
-        ctx.save();
-        ctx.translate(charX, textElement.y);
-        ctx.scale(GLYPH_SCALE_FACTOR, -GLYPH_SCALE_FACTOR);
         renderSVGPath(ctx, glyph.path);
         ctx.fillStyle = '#ffffff';
         ctx.fill();
-        ctx.restore();
-        charX += glyph.width * GLYPH_SCALE_FACTOR;
       } else {
-        ctx.save();
-        ctx.translate(charX, textElement.y);
-        ctx.scale(1, -1);
+        // Fallback for missing glyphs
+        ctx.scale(100, -100);
         ctx.fillStyle = '#ffffff';
-        ctx.font = FALLBACK_FONT;
+        ctx.font = '12px serif';
         ctx.fillText(char, 0, 0);
-        ctx.restore();
-        charX += FALLBACK_CHAR_WIDTH;
       }
+      
+      ctx.restore();
+    } else if (textElement.content.length > 1) {
+      // Multi-character text
+      ctx.save();
+      ctx.translate(textElement.x, textElement.y);
+      ctx.scale(0.01, -0.01);
+      
+      let charOffset = 0;
+      for (const char of textElement.content) {
+        const glyph = latexData.glyphs.get(char);
+        if (glyph?.path) {
+          ctx.save();
+          ctx.translate(charOffset, 0);
+          renderSVGPath(ctx, glyph.path);
+          ctx.fillStyle = '#ffffff';
+          ctx.fill();
+          ctx.restore();
+          charOffset += glyph.width;
+        } else {
+          ctx.save();
+          ctx.translate(charOffset, 0);
+          ctx.scale(100, -100);
+          ctx.fillStyle = '#ffffff';
+          ctx.font = '12px serif';
+          ctx.fillText(char, 0, 0);
+          ctx.restore();
+          charOffset += 600;
+        }
+      }
+      
+      ctx.restore();
     }
+    // Empty text elements are now simply skipped
   }
   
   ctx.restore();
