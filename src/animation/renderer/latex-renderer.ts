@@ -8,6 +8,11 @@ import type { ParsedLatex, ParsedGlyph, ParsedTextElement, ParsedPathElement, No
 
 const execAsync = promisify(exec);
 
+interface CSSClass {
+  fontFamily: string;
+  fontSize: number;
+}
+
 export async function latexToSvg(equation: string): Promise<string> {
   const tempDir = path.join(os.tmpdir(), `latex_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
   
@@ -61,7 +66,7 @@ $\\displaystyle ${cleanEquation}$
       try {
         fs.rmSync(tempDir, { recursive: true, force: true });
       } catch {
-        console.warn(`Failed to clean up temp directory: ${tempDir}`);
+        // Silent cleanup failure
       }
     }
   }
@@ -82,75 +87,124 @@ function parseAttribute<T = string>(
   return parsed !== undefined && !Number.isNaN(parsed) ? parsed : undefined;
 }
 
-export function parseSVGContent(svgContent: string): ParsedLatex {
-  console.log('=== GLYPH PARSING START ===');
+function parseCSSStyles(svgContent: string): { classMap: Map<string, CSSClass>, baseFontSize: number } {
+  const classMap = new Map<string, CSSClass>();
   
-  const glyphs = new Map<string, ParsedGlyph>();
+  const styleRegex = /<style[^>]*>(.*?)<\/style>/s;
+  const styleMatch = styleRegex.exec(svgContent);
+  if (!styleMatch?.[1]) {
+    return { classMap, baseFontSize: 12 };
+  }
   
-  // Parse ALL glyphs from SVG fonts
-  try {
-    const allGlyphMatches = [...svgContent.matchAll(/<glyph[^>]*>/gs)];
-    console.log(`Found ${allGlyphMatches.length} total glyph tags in SVG`);
+  const cssContent = styleMatch[1];
+  const cssRules = cssContent.matchAll(/text\.([^{]+)\s*\{[^}]*font-family:\s*([^;]+);\s*font-size:\s*([0-9.]+)px[^}]*\}/g);
+  
+  for (const rule of cssRules) {
+    const className = rule[1]?.trim();
+    const fontFamily = rule[2]?.trim();
+    const fontSize = rule[3] !== undefined ? parseFloat(rule[3]) : NaN;
     
-    for (let i = 0; i < allGlyphMatches.length; i++) {
-      const match = allGlyphMatches[i];
-      const tag = match[0];
-      const unicode = parseAttribute(tag, 'unicode');
-      const glyphName = parseAttribute(tag, 'glyph-name');
-      const width = parseAttribute(tag, 'horiz-adv-x', parseFloat) ?? 500;
-      const pathData = parseAttribute(tag, 'd');
+    if (className && fontFamily && !isNaN(fontSize)) {
+      classMap.set(className, { fontFamily, fontSize });
+    }
+  }
+  
+  const baseFontSize = classMap.size > 0 
+    ? Math.max(...Array.from(classMap.values()).map(c => c.fontSize))
+    : 12;
+    
+  return { classMap, baseFontSize };
+}
+
+function parseGlyphsByFont(svgContent: string): Map<string, Map<string, ParsedGlyph>> {
+  const fontGlyphs = new Map<string, Map<string, ParsedGlyph>>();
+  
+  const fontMatches = [...svgContent.matchAll(/<font[^>]*id=['"]([^'"]*)['"]/g)];
+  
+  for (const fontMatch of fontMatches) {
+    const fontId = fontMatch[1];
+    if (!fontId) continue;
+    
+    const fontGlyphMap = new Map<string, ParsedGlyph>();
+    
+    // Find font block and extract glyphs
+    const fontBlockRegex = new RegExp(`<font[^>]*id=['"]${fontId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"][^>]*>.*?</font>`, 's');
+    const fontBlock = fontBlockRegex.exec(svgContent);
+    
+    if (fontBlock) {
+      const glyphMatches = [...fontBlock[0].matchAll(/<glyph[^>]*>/g)];
       
-      console.log(`Glyph ${i}: name="${glyphName}" unicode="${unicode || 'none'}" hasPath=${!!pathData}`);
-      
-      if (pathData) {
-        if (unicode) {
-          glyphs.set(unicode, { width, path: pathData });
-          console.log(`  -> Added by unicode: "${unicode}"`);
+      for (const glyphMatch of glyphMatches) {
+        const tag = glyphMatch[0];
+        const unicode = parseAttribute(tag, 'unicode');
+        const glyphName = parseAttribute(tag, 'glyph-name');
+        const width = parseAttribute(tag, 'horiz-adv-x', parseFloat) ?? 500;
+        const pathData = parseAttribute(tag, 'd');
+        
+        if (pathData) {
+          if (unicode) {
+            fontGlyphMap.set(unicode, { width, path: pathData });
+          }
+          if (glyphName) {
+            fontGlyphMap.set(glyphName, { width, path: pathData });
+          }
         }
-        if (glyphName) {
-          glyphs.set(glyphName, { width, path: pathData });
-          console.log(`  -> Added by name: "${glyphName}"`);
-        }
-      } else {
-        console.log(`  -> SKIPPED (no path data)`);
       }
     }
     
-    console.log(`=== GLYPH PARSING COMPLETE: ${glyphs.size} glyphs in map ===`);
-  } catch (error) {
-    console.error('Glyph parsing error:', error);
+    fontGlyphs.set(fontId, fontGlyphMap);
   }
   
-  // Parse text elements with mixed base text + tspan support
+  return fontGlyphs;
+}
+
+export function parseSVGContent(svgContent: string): ParsedLatex {
+  const fontGlyphs = parseGlyphsByFont(svgContent);
+  const { classMap, baseFontSize } = parseCSSStyles(svgContent);
+  
   const textElements: ParsedTextElement[] = [];
   try {
     for (const match of svgContent.matchAll(/<text[^>]*>.*?<\/text>/gs)) {
       const textTag = match[0];
-      const baseX = parseAttribute(textTag, 'x', parseFloat) ?? 0;
-      const baseY = parseAttribute(textTag, 'y', parseFloat) ?? 0;
+      const x = parseAttribute(textTag, 'x', parseFloat) ?? 0;
+      const y = parseAttribute(textTag, 'y', parseFloat) ?? 0;
+      const cssClass = parseAttribute(textTag, 'class');
+      const classInfo = cssClass ? classMap.get(cssClass) : undefined;
       
-      // Extract base text content (everything not in tspan)
-      let baseContent = textTag
+      const content = textTag
         .replace(/<text[^>]*>/, '')
         .replace(/<\/text>/, '')
         .replace(/<tspan[^>]*>.*?<\/tspan>/g, '')
         .trim();
       
-      // Add base text if it exists
-      if (baseContent) {
-        textElements.push({ x: baseX, y: baseY, content: baseContent });
+      if (content) {
+        textElements.push({ 
+          x, 
+          y, 
+          content,
+          fontSize: classInfo?.fontSize,
+          fontFamily: classInfo?.fontFamily
+        });
       }
       
-      // Extract tspan elements with individual positioning
       const tspanMatches = [...textTag.matchAll(/<tspan[^>]*>([^<]*)<\/tspan>/g)];
-      
       for (const tspanMatch of tspanMatches) {
         const tspanTag = tspanMatch[0];
         const char = tspanMatch[1]?.trim();
+        
         if (char) {
-          const x = parseAttribute(tspanTag, 'x', parseFloat) ?? baseX;
-          const y = parseAttribute(tspanTag, 'y', parseFloat) ?? baseY;
-          textElements.push({ x, y, content: char });
+          const tspanX = parseAttribute(tspanTag, 'x', parseFloat) ?? x;
+          const tspanY = parseAttribute(tspanTag, 'y', parseFloat) ?? y;
+          const tspanClass = parseAttribute(tspanTag, 'class') ?? cssClass;
+          const tspanClassInfo = tspanClass ? classMap.get(tspanClass) : classInfo;
+          
+          textElements.push({ 
+            x: tspanX, 
+            y: tspanY, 
+            content: char,
+            fontSize: tspanClassInfo?.fontSize,
+            fontFamily: tspanClassInfo?.fontFamily
+          });
         }
       }
     }
@@ -158,7 +212,6 @@ export function parseSVGContent(svgContent: string): ParsedLatex {
     console.warn('Error parsing text elements:', error);
   }
   
-  // Parse path elements
   const pathElements: ParsedPathElement[] = [];
   try {
     for (const match of svgContent.matchAll(/<path[^>]*\/?>|<path[^>]*>.*?<\/path>/gs)) {
@@ -178,7 +231,6 @@ export function parseSVGContent(svgContent: string): ParsedLatex {
     console.warn('Error parsing path elements:', error);
   }
   
-  // Parse line elements
   const lineElements = [];
   try {
     for (const match of svgContent.matchAll(/<line[^>]*\/?>|<line[^>]*>.*?<\/line>/gs)) {
@@ -197,7 +249,6 @@ export function parseSVGContent(svgContent: string): ParsedLatex {
     console.warn('Error parsing line elements:', error);
   }
   
-  // Parse rect elements
   const rectElements = [];
   try {
     for (const match of svgContent.matchAll(/<rect[^>]*\/?>|<rect[^>]*>.*?<\/rect>/gs)) {
@@ -217,7 +268,14 @@ export function parseSVGContent(svgContent: string): ParsedLatex {
     console.warn('Error parsing rect elements:', error);
   }
   
-  return { glyphs, textElements, pathElements, lineElements, rectElements };
+  return { 
+    fontGlyphs,
+    textElements, 
+    pathElements, 
+    lineElements, 
+    rectElements,
+    baseFontSize
+  };
 }
 
 function applyTransform(ctx: NodeCanvasContext | CanvasRenderingContext2D, transform?: string): void {
@@ -337,7 +395,6 @@ export function renderSVGPath(ctx: NodeCanvasContext | CanvasRenderingContext2D,
   }
 }
 
-// Native SVG positioning - no artificial modifications
 export function renderLatex(
   ctx: NodeCanvasContext | CanvasRenderingContext2D, 
   latexData: ParsedLatex, 
@@ -349,7 +406,9 @@ export function renderLatex(
   ctx.translate(x, y);
   ctx.scale(scale, scale);
   
-  // Render paths at ORIGINAL SVG coordinates
+  const baseFontSize = latexData.baseFontSize ?? 12;
+  
+  // Render paths
   for (const pathElement of latexData.pathElements) {
     ctx.save();
     applyTransform(ctx, pathElement.transform);
@@ -372,7 +431,7 @@ export function renderLatex(
     ctx.restore();
   }
   
-  // Render lines at ORIGINAL SVG coordinates
+  // Render lines
   for (const lineElement of latexData.lineElements) {
     ctx.save();
     applyTransform(ctx, lineElement.transform);
@@ -387,7 +446,7 @@ export function renderLatex(
     ctx.restore();
   }
   
-  // Render rectangles at ORIGINAL SVG coordinates
+  // Render rectangles
   for (const rectElement of latexData.rectElements) {
     ctx.save();
     applyTransform(ctx, rectElement.transform);
@@ -409,39 +468,43 @@ export function renderLatex(
     ctx.restore();
   }
   
-  // Render text at EXACT SVG coordinates
+  // Render text with font-family aware glyph lookup
   for (const textElement of latexData.textElements) {
     if (textElement.content.length === 1) {
-      // Single character with exact position
       const char = textElement.content;
-      const glyph = latexData.glyphs.get(char);
+      const fontFamily = textElement.fontFamily;
+      const glyph = fontFamily ? latexData.fontGlyphs.get(fontFamily)?.get(char) : undefined;
+      const elementFontSize = textElement.fontSize ?? baseFontSize;
+      const relativeScale = elementFontSize / baseFontSize;
       
       ctx.save();
       ctx.translate(textElement.x, textElement.y);
-      ctx.scale(0.01, -0.01);
+      ctx.scale(0.01 * relativeScale, -0.01 * relativeScale);
       
       if (glyph?.path) {
         renderSVGPath(ctx, glyph.path);
         ctx.fillStyle = '#ffffff';
         ctx.fill();
       } else {
-        // Fallback for missing glyphs
         ctx.scale(100, -100);
         ctx.fillStyle = '#ffffff';
-        ctx.font = '12px serif';
+        ctx.font = `${12 * relativeScale}px serif`;
         ctx.fillText(char, 0, 0);
       }
       
       ctx.restore();
     } else if (textElement.content.length > 1) {
-      // Multi-character text
+      const fontFamily = textElement.fontFamily;
+      const elementFontSize = textElement.fontSize ?? baseFontSize;
+      const relativeScale = elementFontSize / baseFontSize;
+      
       ctx.save();
       ctx.translate(textElement.x, textElement.y);
-      ctx.scale(0.01, -0.01);
+      ctx.scale(0.01 * relativeScale, -0.01 * relativeScale);
       
       let charOffset = 0;
       for (const char of textElement.content) {
-        const glyph = latexData.glyphs.get(char);
+        const glyph = fontFamily ? latexData.fontGlyphs.get(fontFamily)?.get(char) : undefined;
         if (glyph?.path) {
           ctx.save();
           ctx.translate(charOffset, 0);
@@ -455,16 +518,15 @@ export function renderLatex(
           ctx.translate(charOffset, 0);
           ctx.scale(100, -100);
           ctx.fillStyle = '#ffffff';
-          ctx.font = '12px serif';
+          ctx.font = `${12 * relativeScale}px serif`;
           ctx.fillText(char, 0, 0);
           ctx.restore();
-          charOffset += 600;
+          charOffset += 600 * relativeScale;
         }
       }
       
       ctx.restore();
     }
-    // Empty text elements are now simply skipped
   }
   
   ctx.restore();

@@ -37,6 +37,8 @@ export interface ParsedTextElement {
   x: number;
   y: number;
   content: string;
+  fontSize?: number;
+  fontFamily?: string;
 }
 
 export interface ParsedPathElement {
@@ -69,11 +71,12 @@ export interface ParsedRectElement {
 }
 
 export interface ParsedLatex {
-  glyphs: Map<string, ParsedGlyph>;
+  fontGlyphs: Map<string, Map<string, ParsedGlyph>>;
   textElements: ParsedTextElement[];
   pathElements: ParsedPathElement[];
   lineElements: ParsedLineElement[];
   rectElements: ParsedRectElement[];
+  baseFontSize: number;
 }
 
 export type NodeCanvasContext = NodeCanvasCtx;
